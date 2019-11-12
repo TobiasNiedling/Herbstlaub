@@ -50,12 +50,37 @@ import akka.stream.ActorMaterializer;
 import akka.stream.javadsl.Flow;
 
 import java.io.IOException;
-import java.util.concurrent.CompletionStage;
 import akka.japi.function.Function;
 
 import java.io.ByteArrayOutputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
+
+import akka.actor.AbstractActor;
+import akka.http.javadsl.Http;
+import akka.http.javadsl.model.HttpRequest;
+import akka.http.javadsl.model.HttpResponse;
+import akka.stream.ActorMaterializer;
+import akka.stream.Materializer;
+import scala.concurrent.ExecutionContextExecutor;
+
+import akka.http.javadsl.model.*;
+import akka.http.javadsl.model.headers.*;
+
+import java.util.Optional;
+
+import static akka.pattern.PatternsCS.pipe;
+
+import akka.actor.AbstractActor;
+import akka.http.javadsl.Http;
+import akka.http.javadsl.model.HttpRequest;
+import akka.http.javadsl.model.HttpResponse;
+import akka.japi.pf.ReceiveBuilder;
+import akka.stream.ActorMaterializer;
+import akka.stream.Materializer;
+import scala.concurrent.ExecutionContextExecutor;
+
+import static akka.pattern.PatternsCS.pipe;
 
 public class LargeMessageProxy extends AbstractLoggingActor {
 
@@ -126,7 +151,7 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 		ActorRef receiver = message.getReceiver();
 		ActorSelection receiverProxy = this.context().actorSelection(receiver.path().child(DEFAULT_NAME));
 
-		final byte [] data = getBytesFromMessage(message.getMessage());
+		final byte [] data = getBytesFromMessage(message);
 
 		final Configuration c = ConfigurationSingleton.get();
 
@@ -178,5 +203,22 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 	private void handle(BytesMessage<?> message) {
 		// Reassemble the message content, deserialize it and/or load the content from some local location before forwarding its content.
 		message.getReceiver().tell(message.getBytes(), message.getSender());
+
+		Materializer materializer = ActorMaterializer.create(this.context().system());
+		final ExecutionContextExecutor dispatcher = this.context().dispatcher();
+		final CompletionStage<HttpResponse> response =  
+			Http.get(this.context().system()).singleRequest(HttpRequest.create("http://127.0.0.1:45454/payload"), materializer);
+		
+		response.whenComplete((content, error) -> {
+			if (error != null) {
+				this.log().error("Oh no! An error occured");
+				this.log().error(error.getMessage());
+			} else {
+				this.log().info("We got a response!");
+				this.log().info(content.entity().toString());
+			}
+		});
+
+		//this.log().info(responseFuture.toString());
 	}
 }
