@@ -10,6 +10,25 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import akka.stream.*;
+import akka.stream.javadsl.*;
+import akka.http.javadsl.*;
+
+import de.hpi.ddm.configuration.Configuration;
+import de.hpi.ddm.configuration.ConfigurationSingleton;
+
+//TODO Check which are neaded
+import akka.Done;
+import akka.NotUsed;
+import akka.actor.ActorSystem;
+import akka.util.ByteString;
+
+import java.nio.file.Paths;
+import java.math.BigInteger;
+import java.time.Duration;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+
 public class LargeMessageProxy extends AbstractLoggingActor {
 
 	////////////////////////
@@ -65,7 +84,21 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 	private void handle(LargeMessage<?> message) {
 		ActorRef receiver = message.getReceiver();
 		ActorSelection receiverProxy = this.context().actorSelection(receiver.path().child(DEFAULT_NAME));
-		
+
+		final Configuration c = ConfigurationSingleton.get();
+
+		Materializer materializer = ActorMaterializer.create(this.context().system());
+
+		Source<IncomingConnection, CompletionStage<ServerBinding>> serverSource =
+		Http.get(this.context().system()).bind(ConnectHttp.toHost(c.getHost(), 45454), materializer);
+
+		CompletionStage<ServerBinding> serverBindingFuture =
+		serverSource.to(Sink.foreach(connection -> {
+			System.out.println("Accepted new connection from " + connection.remoteAddress());
+			// ... and then actually handle the connection
+			}
+		)).run(materializer);
+
 		// This will definitely fail in a distributed setting if the serialized message is large!
 		// Solution options:
 		// 1. Serialize the object and send its bytes batch-wise (make sure to use artery's side channel then).
