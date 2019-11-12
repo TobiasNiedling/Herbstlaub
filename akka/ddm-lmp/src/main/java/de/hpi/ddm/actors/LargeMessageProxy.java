@@ -53,6 +53,10 @@ import java.io.IOException;
 import java.util.concurrent.CompletionStage;
 import akka.japi.function.Function;
 
+import java.io.ByteArrayOutputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
+
 public class LargeMessageProxy extends AbstractLoggingActor {
 
 	////////////////////////
@@ -105,9 +109,24 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 				.build();
 	}
 
+	private byte[] getBytesFromMessage(LargeMessage<?> message) {
+		try {
+			ByteArrayOutputStream bos = new ByteArrayOutputStream();
+			ObjectOutputStream oos = new ObjectOutputStream(bos);
+			oos.writeObject(message);
+			oos.flush();
+			return bos.toByteArray();
+		} catch (IOException e) {
+			this.log().error("Could not serizalize message");
+			return "IOException occurred - C'est la vie.".getBytes();
+		}
+	}
+
 	private void handle(LargeMessage<?> message) {
 		ActorRef receiver = message.getReceiver();
 		ActorSelection receiverProxy = this.context().actorSelection(receiver.path().child(DEFAULT_NAME));
+
+		final byte [] data = getBytesFromMessage(message.getMessage());
 
 		final Configuration c = ConfigurationSingleton.get();
 
@@ -120,27 +139,17 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 		new Function<HttpRequest, HttpResponse>() {
 		  private final HttpResponse NOT_FOUND =
 			HttpResponse.create()
-			  .withStatus(404)
-			  .withEntity("Unknown resource!");
+			  .withStatus(404);
 	  
 	  
 		  @Override
 		  public HttpResponse apply(HttpRequest request) throws Exception {
 			Uri uri = request.getUri();
 			if (request.method() == HttpMethods.GET) {
-			  if (uri.path().equals("/")) {
+			  if (uri.path().equals("/payload")) {
 				return
 				  HttpResponse.create()
-					.withEntity(ContentTypes.TEXT_HTML_UTF8,
-					  "<html><body>Hello world!</body></html>");
-			  } else if (uri.path().equals("/hello")) {
-				String name = uri.query().get("name").orElse("Mister X");
-	  
-				return
-				  HttpResponse.create()
-					.withEntity("Hello " + name + "!");
-			  } else if (uri.path().equals("/ping")) {
-				return HttpResponse.create().withEntity("PONG!");
+					.withEntity(data);
 			  } else {
 				return NOT_FOUND;
 			  }
@@ -156,11 +165,6 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 			connection.handleWith(Flow.of(HttpRequest.class).map(requestHandler), materializer);
 			}
 		)).run(materializer);
-
-		
-  /*final CompletionStage<ServerBinding> binding = 
-        http.bindAndHandle(routeFlow, ConnectHttp.toHost("localhost", 8080), 
-        materializer);*/
 
 		// This will definitely fail in a distributed setting if the serialized message is large!
 		// Solution options:
