@@ -39,6 +39,7 @@ import akka.http.javadsl.Http;
 import akka.http.javadsl.ServerBinding;
 import akka.http.javadsl.model.ContentTypes;
 import akka.http.javadsl.model.HttpEntities;
+import akka.http.javadsl.model.HttpEntity.Strict;
 import akka.http.javadsl.model.HttpRequest;
 import akka.http.javadsl.model.HttpResponse;
 import akka.http.javadsl.model.HttpMethods.*;
@@ -54,6 +55,8 @@ import akka.japi.function.Function;
 
 import java.io.ByteArrayOutputStream;
 import java.io.ObjectOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.ObjectInputStream;
 import java.io.Serializable;
 
 import akka.actor.AbstractActor;
@@ -81,6 +84,8 @@ import akka.stream.Materializer;
 import scala.concurrent.ExecutionContextExecutor;
 
 import static akka.pattern.PatternsCS.pipe;
+
+import akka.http.javadsl.unmarshalling.Unmarshaller;
 
 public class LargeMessageProxy extends AbstractLoggingActor {
 
@@ -134,7 +139,7 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 				.build();
 	}
 
-	private byte[] getBytesFromMessage(LargeMessage<?> message) {
+	private byte[] getBytesFromMessage(BytesMessage<?> message) {
 		try {
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();
 			ObjectOutputStream oos = new ObjectOutputStream(bos);
@@ -147,11 +152,28 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 		}
 	}
 
+	private BytesMessage<?> getMessageFromBytes(byte[] data) {
+		try {
+			ByteArrayInputStream bis = new ByteArrayInputStream(data);
+			ObjectInputStream ois = new ObjectInputStream(bis);
+			BytesMessage<?> result = (BytesMessage<?>) ois.readObject();
+			ois.close();
+			bis.close();
+			return result;
+		} catch (Exception e) {
+			this.log().error("Could not deserizalize message");
+			this.log().error(e.getMessage());
+			return new LargeMessageProxy.BytesMessage<>();
+		}
+	}
+
 	private void handle(LargeMessage<?> message) {
 		ActorRef receiver = message.getReceiver();
 		ActorSelection receiverProxy = this.context().actorSelection(receiver.path().child(DEFAULT_NAME));
 
-		final byte [] data = getBytesFromMessage(message);
+		//this.log().info(new BytesMessage<>(message.getMessage(), this.sender(), message.getReceiver()).getClass().toString());
+
+		final byte [] data = getBytesFromMessage(new BytesMessage<>(message.getMessage(), this.sender(), message.getReceiver()));
 
 		final Configuration c = ConfigurationSingleton.get();
 
@@ -215,10 +237,16 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 				this.log().error(error.getMessage());
 			} else {
 				this.log().info("We got a response!");
-				this.log().info(content.entity().toString());
+				if (content.entity().isStrict()) {
+					this.log().info("Is strict");
+				};
+				CompletionStage<byte[]> stage = Unmarshaller.entityToByteArray().unmarshal(content.entity(),materializer);
+				stage.whenComplete((content2, error2) -> {
+					this.log().info(content2.toString());
+					BytesMessage<?> deserialized = this.getMessageFromBytes(content2);
+					this.log().info(deserialized.getBytes().toString());
+				});
 			}
 		});
-
-		//this.log().info(responseFuture.toString());
 	}
 }
