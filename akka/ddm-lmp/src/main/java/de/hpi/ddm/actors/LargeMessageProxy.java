@@ -117,6 +117,12 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 		private ActorRef sender;
 		private ActorRef receiver;
 	}
+
+	@Data @NoArgsConstructor @AllArgsConstructor
+	public static class TransferMessage<T> implements Serializable {
+		private T content;
+		private String host;
+	}
 	
 	/////////////////
 	// Actor State //
@@ -139,7 +145,7 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 				.build();
 	}
 
-	private byte[] getBytesFromMessage(BytesMessage<?> message) {
+	private byte[] getBytesFromMessage(TransferMessage<?> message) {
 		try {
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();
 			ObjectOutputStream oos = new ObjectOutputStream(bos);
@@ -152,18 +158,18 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 		}
 	}
 
-	private BytesMessage<?> getMessageFromBytes(byte[] data) {
+	private TransferMessage<?> getMessageFromBytes(byte[] data) {
 		try {
 			ByteArrayInputStream bis = new ByteArrayInputStream(data);
 			ObjectInputStream ois = new ObjectInputStream(bis);
-			BytesMessage<?> result = (BytesMessage<?>) ois.readObject();
+			TransferMessage<?> result = (TransferMessage<?>) ois.readObject();
 			ois.close();
 			bis.close();
 			return result;
 		} catch (Exception e) {
 			this.log().error("Could not deserizalize message");
 			this.log().error(e.getMessage());
-			return new LargeMessageProxy.BytesMessage<>();
+			return new LargeMessageProxy.TransferMessage<>();
 		}
 	}
 
@@ -171,12 +177,10 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 		ActorRef receiver = message.getReceiver();
 		ActorSelection receiverProxy = this.context().actorSelection(receiver.path().child(DEFAULT_NAME));
 
-		//this.log().info(new BytesMessage<>(message.getMessage(), this.sender(), message.getReceiver()).getClass().toString());
-
-		final byte [] data = getBytesFromMessage(new BytesMessage<>(message.getMessage(), this.sender(), message.getReceiver()));
-
 		final Configuration c = ConfigurationSingleton.get();
 
+		final byte [] data = getBytesFromMessage(new LargeMessageProxy.TransferMessage<>(message.getMessage(),c.getHost()));
+		
 		Materializer materializer = ActorMaterializer.create(this.context().system());
 
 		Source<IncomingConnection, CompletionStage<ServerBinding>> serverSource =
@@ -219,17 +223,17 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 		// 2. Serialize the object and send its bytes via Akka streaming.
 		// 3. Send the object via Akka's http client-server component.
 		// 4. Other ideas ...
-		receiverProxy.tell(new BytesMessage<>(message.getMessage(), this.sender(), message.getReceiver()), this.self());
+		receiverProxy.tell(new BytesMessage<String>("http://"+c.getHost()+":45454/payload", this.sender(), message.getReceiver()), this.self());
 	}
 
-	private void handle(BytesMessage<?> message) {
+	private void handle(BytesMessage<String> message) {
 		// Reassemble the message content, deserialize it and/or load the content from some local location before forwarding its content.
-		message.getReceiver().tell(message.getBytes(), message.getSender());
+		String url = message.getBytes();
 
 		Materializer materializer = ActorMaterializer.create(this.context().system());
 		final ExecutionContextExecutor dispatcher = this.context().dispatcher();
 		final CompletionStage<HttpResponse> response =  
-			Http.get(this.context().system()).singleRequest(HttpRequest.create("http://127.0.0.1:45454/payload"), materializer);
+			Http.get(this.context().system()).singleRequest(HttpRequest.create(url), materializer);
 		
 		response.whenComplete((content, error) -> {
 			if (error != null) {
@@ -243,8 +247,9 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 				CompletionStage<byte[]> stage = Unmarshaller.entityToByteArray().unmarshal(content.entity(),materializer);
 				stage.whenComplete((content2, error2) -> {
 					this.log().info(content2.toString());
-					BytesMessage<?> deserialized = this.getMessageFromBytes(content2);
-					this.log().info(deserialized.getBytes().toString());
+					TransferMessage<?> deserialized = this.getMessageFromBytes(content2);
+					this.log().info(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> " + deserialized.getHost());
+					message.getReceiver().tell(deserialized.getContent(), message.getSender());
 				});
 			}
 		});
