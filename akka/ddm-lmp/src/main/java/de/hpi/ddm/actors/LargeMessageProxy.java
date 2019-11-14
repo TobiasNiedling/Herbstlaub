@@ -30,6 +30,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.ObjectOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ObjectInputStream;
+import java.util.UUID;
 
 //Additional
 import java.util.concurrent.CompletionStage;
@@ -125,29 +126,30 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 
 	private void handle(LargeMessage<?> message) {
 		ActorRef receiver = message.getReceiver();
-		ActorSelection receiverProxy = this.context().actorSelection(receiver.path().child(DEFAULT_NAME));
-
+		ActorSelection receiverProxy = this.context().actorSelection(receiver.path().child(DEFAULT_NAME));	
+		
 		final Configuration c = ConfigurationSingleton.get();
 
 		final byte [] data = getBytesFromMessage(new LargeMessageProxy.TransferMessage<>(message.getMessage(),c.getHost()));
 		
 		Materializer materializer = ActorMaterializer.create(this.context().system());
-
 		Source<IncomingConnection, CompletionStage<ServerBinding>> serverSource =
 		Http.get(this.context().system()).bind(ConnectHttp.toHost(c.getHost(), 45454), materializer);
 
+		UUID uuid = UUID.randomUUID();
+		String randomUUIDString = uuid.toString();
+
+		//Return message if /payload/randomID is accessed with GET, else return 404
 		final Function<HttpRequest, HttpResponse> requestHandler =
 		new Function<HttpRequest, HttpResponse>() {
 		  private final HttpResponse NOT_FOUND =
 			HttpResponse.create()
-			  .withStatus(404);
-	  
-	  
+			  .withStatus(404);	  
 		  @Override
 		  public HttpResponse apply(HttpRequest request) throws Exception {
 			Uri uri = request.getUri();
 			if (request.method() == HttpMethods.GET) {
-			  if (uri.path().equals("/payload")) {
+			  if (uri.path().equals("/payload/"+randomUUIDString)) {
 				return
 				  HttpResponse.create()
 					.withEntity(data);
@@ -166,7 +168,7 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 			}
 		)).run(materializer);
 
-		receiverProxy.tell(new BytesMessage<String>("http://"+c.getHost()+":45454/payload", this.sender(), message.getReceiver()), this.self());
+		receiverProxy.tell(new BytesMessage<String>("http://"+c.getHost()+":45454/payload/"+randomUUIDString, this.sender(), message.getReceiver()), this.self());
 	}
 
 	private void handle(BytesMessage<String> message) {
