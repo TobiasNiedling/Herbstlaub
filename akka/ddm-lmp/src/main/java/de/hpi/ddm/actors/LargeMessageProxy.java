@@ -15,9 +15,11 @@ import akka.stream.*;
 import akka.stream.javadsl.*;
 import akka.http.javadsl.*;
 import akka.http.javadsl.model.*;
+import akka.http.javadsl.model.HttpEntity;
 import akka.http.javadsl.model.HttpMethods.*;
 import akka.http.javadsl.server.*;
 import akka.http.javadsl.server.Directives.*;
+import java.net.BindException;
 
 //Configuration
 import de.hpi.ddm.configuration.Configuration;
@@ -35,6 +37,7 @@ import java.util.UUID;
 //Additional
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ThreadLocalRandom;
 import scala.concurrent.ExecutionContextExecutor;
 import akka.japi.function.Function;
 
@@ -105,7 +108,9 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 			return bos.toByteArray();
 		} catch (Exception e) {
 			this.log().error("Could not serizalize message");
-			return "IOException occurred - C'est la vie.".getBytes();
+			e.printStackTrace();
+			this.log().info(message.getContent().toString());
+			return "Exception occured".getBytes();
 		}
 	}
 
@@ -131,35 +136,36 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 		final Configuration c = ConfigurationSingleton.get();
 
 		final byte [] data = getBytesFromMessage(new LargeMessageProxy.TransferMessage<>(message.getMessage(),c.getHost()));
-		
-		Materializer materializer = ActorMaterializer.create(this.context().system());
-		Source<IncomingConnection, CompletionStage<ServerBinding>> serverSource =
-		Http.get(this.context().system()).bind(ConnectHttp.toHost(c.getHost(), 45454), materializer);
 
 		UUID uuid = UUID.randomUUID();
 		String randomUUIDString = uuid.toString();
+		Integer port = ThreadLocalRandom.current().nextInt(49152, 65535 + 1); //Randomize port number, otherwise different workes will try to bind the same
+			
+		Materializer materializer = ActorMaterializer.create(this.context().system());
+		Source<IncomingConnection, CompletionStage<ServerBinding>> serverSource =
+		Http.get(this.context().system()).bind(ConnectHttp.toHost(c.getHost(), port), materializer);
 
 		//Return message if /payload/randomID is accessed with GET, else return 404
 		final Function<HttpRequest, HttpResponse> requestHandler =
 		new Function<HttpRequest, HttpResponse>() {
-		  private final HttpResponse NOT_FOUND =
+		private final HttpResponse NOT_FOUND =
 			HttpResponse.create()
-			  .withStatus(404);	  
-		  @Override
-		  public HttpResponse apply(HttpRequest request) throws Exception {
+			.withStatus(404);	  
+		@Override
+		public HttpResponse apply(HttpRequest request) throws Exception {
 			Uri uri = request.getUri();
 			if (request.method() == HttpMethods.GET) {
-			  if (uri.path().equals("/payload/"+randomUUIDString)) {
+			if (uri.path().equals("/payload/"+randomUUIDString)) {
 				return
-				  HttpResponse.create()
+				HttpResponse.create()
 					.withEntity(data);
-			  } else {
-				return NOT_FOUND;
-			  }
 			} else {
-			  return NOT_FOUND;
+				return NOT_FOUND;
 			}
-		  }
+			} else {
+			return NOT_FOUND;
+			}
+		}
 		};
 
 		CompletionStage<ServerBinding> serverBindingFuture =
@@ -168,7 +174,7 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 			}
 		)).run(materializer);
 
-		receiverProxy.tell(new BytesMessage<String>("http://"+c.getHost()+":45454/payload/"+randomUUIDString, this.sender(), message.getReceiver()), this.self());
+		receiverProxy.tell(new BytesMessage<String>("http://"+c.getHost()+":"+port.toString()+"/payload/"+randomUUIDString, this.sender(), message.getReceiver()), this.self());
 	}
 
 	private void handle(BytesMessage<String> message) {
@@ -183,9 +189,8 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 			if (error != null) {
 				this.log().error(error.getMessage());
 			} else {
-				CompletionStage<byte[]> stage = Unmarshaller.entityToByteArray().unmarshal(content.entity(),materializer);
+				CompletionStage<byte[]> stage = Unmarshaller.entityToByteArray().unmarshal(content.entity().withoutSizeLimit(),materializer);
 				stage.whenComplete((content2, error2) -> {
-					this.log().info(content2.toString());
 					TransferMessage<?> deserialized = this.getMessageFromBytes(content2);
 					message.getReceiver().tell(deserialized.getContent(), message.getSender());
 				});
