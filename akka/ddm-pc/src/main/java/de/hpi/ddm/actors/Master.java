@@ -5,6 +5,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import org.apache.commons.lang3.ArrayUtils;
+
 import akka.actor.AbstractLoggingActor;
 import akka.actor.ActorRef;
 import akka.actor.PoisonPill;
@@ -45,6 +47,24 @@ public class Master extends AbstractLoggingActor {
 	public static class BatchMessage implements Serializable {
 		private static final long serialVersionUID = 8343040942748609598L;
 		private List<String[]> lines;
+	}
+
+	@Data @NoArgsConstructor @AllArgsConstructor
+	public static class TaskMessage implements Serializable {
+		private static final long serialVersionUID = 123456789L; //Wofür ist die eigentlich da?
+		private Boolean crackPassword;
+		private String sha256;
+		private char[] charset;
+		private String fixedStart;
+		private int id;
+	}
+
+	@Data @NoArgsConstructor @AllArgsConstructor
+	public static class ResponseMessage implements Serializable {
+		private static final long serialVersionUID = 987654321L; //Wofür ist die eigentlich da?
+		private Boolean success;
+		private String cracked;
+		private int id;
 	}
 
 	@Data
@@ -91,6 +111,36 @@ public class Master extends AbstractLoggingActor {
 		
 		this.reader.tell(new Reader.ReadMessage(), this.self());
 	}
+
+	private ArrayList<TaskMessage> subdivideTasks(ArrayList<TaskMessage> tasks) {
+		ArrayList<TaskMessage> result = new ArrayList<>();
+
+		for (TaskMessage task : tasks) {
+			if (task.getFixedStart().length() >= 4) {
+				result.add(task);
+			} else {
+				ArrayList<TaskMessage> subdivide = new ArrayList<>();
+				for (int i = 0; i<task.getCharset().length; i++) {
+					char[] newCharset = new char[task.getCharset().length-1];
+					newCharset = ArrayUtils.remove(task.getCharset(), i);
+					String startString = task.getFixedStart() + task.getCharset()[i];
+					subdivide.add(new TaskMessage(task.getCrackPassword(), task.getSha256(), newCharset, startString, task.getId()));
+				}
+				result.addAll(this.subdivideTasks(subdivide));
+			}
+		}			
+		return result;
+	}
+
+	private ArrayList<TaskMessage> hintTasks(int id, char[] charset, byte length, String password, ArrayList<String> hints) {
+
+		ArrayList<TaskMessage> result = new ArrayList<>();
+		for (int i = 0; i < hints.size(); i++) {
+			result.add(new TaskMessage(false,hints.get(i),charset,"",id));
+		}
+
+		return this.subdivideTasks(result);
+	}
 	
 	protected void handle(BatchMessage message) {
 		
@@ -107,8 +157,32 @@ public class Master extends AbstractLoggingActor {
 			return;
 		}
 		
-		for (String[] line : message.getLines())
-			System.out.println(Arrays.toString(line));
+		for (String[] line : message.getLines()) {
+			this.log().info("Now processing password ID " + line[0].toString() + " - " + line[1].toString());
+			int id = Integer.parseInt(line[0]);
+			char[] charset = line[2].toCharArray();
+			byte length = Byte.parseByte(line[3]);
+			String password = line[4];
+			ArrayList<String> hints = new ArrayList<>();
+			
+			for (int i = 5; i < line.length; i++) {
+				hints.add(line[i]);
+			}
+
+			this.log().info("\tCharset is " + Arrays.toString(charset) + ", lenght is " + length + ", number of hints is " + hints.size());
+
+			ArrayList<TaskMessage> tasks = this.hintTasks(id, charset, length, password, hints);
+			this.log().info("Generated " + tasks.size() + " subtasks");
+
+			for (TaskMessage taskMessage : tasks) {
+				//this.workers
+			}
+
+			//Idee: Für jede Zeile einen Stapel von Aufgaben erzeugen
+			//Jede an einen Slave schicken -> advanced: überflüssige aufgaben canceln
+			//Probleme: Wie verteilt man die Aufgaben gut (unabhängig von der Hinweiszahl und Worker Zahl) --> Aufgaben möglichst klein halten
+			//Porbleme: Was wenn ein Worker failed?s
+		}
 		
 		this.collector.tell(new Collector.CollectMessage("Processed batch of size " + message.getLines().size()), this.self());
 		this.reader.tell(new Reader.ReadMessage(), this.self());
