@@ -3,6 +3,7 @@ package de.hpi.ddm.actors;
 import java.io.UnsupportedEncodingException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.List;
 
 import akka.actor.AbstractLoggingActor;
@@ -70,6 +71,7 @@ public class Worker extends AbstractLoggingActor {
 				.match(CurrentClusterState.class, this::handle)
 				.match(MemberUp.class, this::handle)
 				.match(MemberRemoved.class, this::handle)
+				.match(Master.TaskMessage.class, this::handle)
 				.matchAny(object -> this.log().info("Received unknown message: \"{}\"", object.toString()))
 				.build();
 	}
@@ -83,6 +85,24 @@ public class Worker extends AbstractLoggingActor {
 
 	private void handle(MemberUp message) {
 		this.register(message.member());
+	}
+
+	private void handle(Master.TaskMessage message) {
+		ArrayList<String> permutated = new ArrayList<>();
+		this.heapPermutation(message.getCharset(), message.getCharset().length, message.getCharset().length, permutated);
+		String prepend = message.getFixedStart();
+		Boolean stop = false;
+		for (String permutate : permutated) {
+			String calcHash = this.hash(prepend+permutate);
+			for (String hash : message.getSha256()) {
+				if (calcHash.equals(hash)) {
+					this.log().info(prepend+permutate+" is a hint for password " + message.getId() + " - Char is: "+message.getMissingChar());
+					stop = true;
+				}
+				if (stop) break;
+			}
+			if (stop) break;
+		}
 	}
 
 	private void register(Member member) {
@@ -116,10 +136,8 @@ public class Worker extends AbstractLoggingActor {
 		}
 	}
 	
-	// Generating all permutations of an array using Heap's Algorithm
-	// https://en.wikipedia.org/wiki/Heap's_algorithm
-	// https://www.geeksforgeeks.org/heaps-algorithm-for-generating-permutations/
 	private void heapPermutation(char[] a, int size, int n, List<String> l) {
+		//What the hell does parameter n do?
 		// If size is 1, store the obtained permutation
 		if (size == 1)
 			l.add(new String(a));

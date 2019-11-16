@@ -53,10 +53,12 @@ public class Master extends AbstractLoggingActor {
 	public static class TaskMessage implements Serializable {
 		private static final long serialVersionUID = 123456789L; //Wofür ist die eigentlich da?
 		private Boolean crackPassword;
-		private String sha256;
+		private String[] sha256;
 		private char[] charset;
+		private char missingChar;
 		private String fixedStart;
 		private int id;
+		private int subtaskId;
 	}
 
 	@Data @NoArgsConstructor @AllArgsConstructor
@@ -65,6 +67,7 @@ public class Master extends AbstractLoggingActor {
 		private Boolean success;
 		private String cracked;
 		private int id;
+		private int subtaskId;
 	}
 
 	@Data
@@ -112,11 +115,11 @@ public class Master extends AbstractLoggingActor {
 		this.reader.tell(new Reader.ReadMessage(), this.self());
 	}
 
-	private ArrayList<TaskMessage> subdivideTasks(ArrayList<TaskMessage> tasks) {
+	private ArrayList<TaskMessage> subdivideTasks(ArrayList<TaskMessage> tasks, int breakLength) {
 		ArrayList<TaskMessage> result = new ArrayList<>();
 
 		for (TaskMessage task : tasks) {
-			if (task.getFixedStart().length() >= 4) {
+			if (task.getFixedStart().length() >= breakLength) {
 				result.add(task);
 			} else {
 				ArrayList<TaskMessage> subdivide = new ArrayList<>();
@@ -124,22 +127,27 @@ public class Master extends AbstractLoggingActor {
 					char[] newCharset = new char[task.getCharset().length-1];
 					newCharset = ArrayUtils.remove(task.getCharset(), i);
 					String startString = task.getFixedStart() + task.getCharset()[i];
-					subdivide.add(new TaskMessage(task.getCrackPassword(), task.getSha256(), newCharset, startString, task.getId()));
+					subdivide.add(new TaskMessage(task.getCrackPassword(), task.getSha256(), newCharset, task.getMissingChar(), startString, task.getId(), 0));
 				}
-				result.addAll(this.subdivideTasks(subdivide));
+				result.addAll(this.subdivideTasks(subdivide, breakLength));
 			}
 		}			
 		return result;
 	}
 
-	private ArrayList<TaskMessage> hintTasks(int id, char[] charset, byte length, String password, ArrayList<String> hints) {
+	private ArrayList<TaskMessage> hintTasks(int id, char[] charset, byte length, String password, String[] hints) {
 
 		ArrayList<TaskMessage> result = new ArrayList<>();
-		for (int i = 0; i < hints.size(); i++) {
-			result.add(new TaskMessage(false,hints.get(i),charset,"",id));
+		for (int j = 0; j < charset.length; j++) {
+			char[] reducedCharset = new char[charset.length-1];
+			reducedCharset = ArrayUtils.remove(charset, j);
+			result.add(new TaskMessage(false,hints,reducedCharset,charset[j],"",id, 0));
 		}
 
-		return this.subdivideTasks(result);
+		//Find a break length, that the master is not stucked ("3"), but the workers stillt have something to do ("8")
+		int breakLength = Math.min(3,result.get(0).getCharset().length-8);
+
+		return this.subdivideTasks(result, breakLength);
 	}
 	
 	protected void handle(BatchMessage message) {
@@ -158,30 +166,33 @@ public class Master extends AbstractLoggingActor {
 		}
 		
 		for (String[] line : message.getLines()) {
+			//TODO Remove test limitation
+			if (!line[0].equals("1")) {
+				//continue;
+			}
 			this.log().info("Now processing password ID " + line[0].toString() + " - " + line[1].toString());
 			int id = Integer.parseInt(line[0]);
 			char[] charset = line[2].toCharArray();
 			byte length = Byte.parseByte(line[3]);
 			String password = line[4];
-			ArrayList<String> hints = new ArrayList<>();
+			String[] hints = new String[line.length-5];
 			
 			for (int i = 5; i < line.length; i++) {
-				hints.add(line[i]);
+				hints[i-5]=line[i];
 			}
 
-			this.log().info("\tCharset is " + Arrays.toString(charset) + ", lenght is " + length + ", number of hints is " + hints.size());
+			this.log().info("\tCharset is " + Arrays.toString(charset) + ", lenght is " + length + ", number of hints is " + hints.length);
 
 			ArrayList<TaskMessage> tasks = this.hintTasks(id, charset, length, password, hints);
-			this.log().info("Generated " + tasks.size() + " subtasks");
 
-			for (TaskMessage taskMessage : tasks) {
-				//this.workers
+			int tasksSize = tasks.size();
+			this.log().info("Generated " + tasksSize + " subtasks");
+
+			for (int i=0; i < tasksSize; i++) {
+				int workerNum = i % this.workers.size();
+				tasks.get(i).setSubtaskId(i);
+				this.workers.get(workerNum).tell(tasks.get(i), this.self());
 			}
-
-			//Idee: Für jede Zeile einen Stapel von Aufgaben erzeugen
-			//Jede an einen Slave schicken -> advanced: überflüssige aufgaben canceln
-			//Probleme: Wie verteilt man die Aufgaben gut (unabhängig von der Hinweiszahl und Worker Zahl) --> Aufgaben möglichst klein halten
-			//Porbleme: Was wenn ein Worker failed?s
 		}
 		
 		this.collector.tell(new Collector.CollectMessage("Processed batch of size " + message.getLines().size()), this.self());
