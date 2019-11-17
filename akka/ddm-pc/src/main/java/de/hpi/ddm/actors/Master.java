@@ -3,7 +3,9 @@ package de.hpi.ddm.actors;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.lang3.ArrayUtils;
 
@@ -23,6 +25,11 @@ public class Master extends AbstractLoggingActor {
 	////////////////////////
 	
 	public static final String DEFAULT_NAME = "master";
+
+	private ArrayList<TaskMessage> taskQueue = new ArrayList<>();
+	private HashMap<Integer,String> hintMap = new HashMap<>();
+	private HashMap<ActorRef,Boolean> actorsBusyMap = new HashMap<>();
+	private int hintCount;
 
 	public static Props props(final ActorRef reader, final ActorRef collector) {
 		return Props.create(Master.class, () -> new Master(reader, collector));
@@ -56,18 +63,17 @@ public class Master extends AbstractLoggingActor {
 		private String[] sha256;
 		private char[] charset;
 		private char missingChar;
-		private String fixedStart;
 		private int id;
-		private int subtaskId;
+		private ActorRef sender;
 	}
 
 	@Data @NoArgsConstructor @AllArgsConstructor
 	public static class ResponseMessage implements Serializable {
 		private static final long serialVersionUID = 987654321L; //Wofür ist die eigentlich da?
 		private Boolean success;
-		private String cracked;
-		private int id;
-		private int subtaskId;
+		private char hint;
+		private int passwordId;
+		private ActorRef sender;
 	}
 
 	@Data
@@ -105,6 +111,7 @@ public class Master extends AbstractLoggingActor {
 				.match(BatchMessage.class, this::handle)
 				.match(Terminated.class, this::handle)
 				.match(RegistrationMessage.class, this::handle)
+				.match(ResponseMessage.class, this::handle)
 				.matchAny(object -> this.log().info("Received unknown message: \"{}\"", object.toString()))
 				.build();
 	}
@@ -115,49 +122,60 @@ public class Master extends AbstractLoggingActor {
 		this.reader.tell(new Reader.ReadMessage(), this.self());
 	}
 
-	private ArrayList<TaskMessage> subdivideTasks(ArrayList<TaskMessage> tasks, int breakLength) {
-		ArrayList<TaskMessage> result = new ArrayList<>();
-
-		for (TaskMessage task : tasks) {
-			if (task.getFixedStart().length() >= breakLength) {
-				result.add(task);
-			} else {
-				ArrayList<TaskMessage> subdivide = new ArrayList<>();
-				for (int i = 0; i<task.getCharset().length; i++) {
-					char[] newCharset = new char[task.getCharset().length-1];
-					newCharset = ArrayUtils.remove(task.getCharset(), i);
-					String startString = task.getFixedStart() + task.getCharset()[i];
-					subdivide.add(new TaskMessage(task.getCrackPassword(), task.getSha256(), newCharset, task.getMissingChar(), startString, task.getId(), 0));
-				}
-				result.addAll(this.subdivideTasks(subdivide, breakLength));
-			}
-		}			
-		return result;
-	}
-
 	private ArrayList<TaskMessage> hintTasks(int id, char[] charset, byte length, String password, String[] hints) {
 
 		ArrayList<TaskMessage> result = new ArrayList<>();
 		for (int j = 0; j < charset.length; j++) {
 			char[] reducedCharset = new char[charset.length-1];
 			reducedCharset = ArrayUtils.remove(charset, j);
-			result.add(new TaskMessage(false,hints,reducedCharset,charset[j],"",id, 0));
+			result.add(new TaskMessage(false,hints,reducedCharset,charset[j],id, this.self()));
 		}
 
-		//Find a break length, that the master is not stucked ("3"), but the workers stillt have something to do ("8")
-		int breakLength = Math.min(3,result.get(0).getCharset().length-8);
+		return result;
+	}
 
-		return this.subdivideTasks(result, breakLength);
+	private void schedule() {
+		this.log().info("Scheduling...");
+		for (ActorRef actor : this.workers) {
+			this.log().info("Checking actor " + actor.path());
+			if (this.actorsBusyMap.getOrDefault(actor, false)) {
+				continue;
+			}	
+			this.log().info("Scheduling to actor " + actor.path());		
+			TaskMessage nextTask = this.taskQueue.remove(0);
+			this.taskQueue.add(nextTask); //Move nextTask to the end of queue, if worker fails
+			this.actorsBusyMap.put(actor, true);
+			actor.tell(nextTask, this.self());
+		}
+		this.log().info("Finished scheduling");
+	}
+
+	protected void handle(ResponseMessage message) {
+		this.log().info("Got response from actor " + message.getSender().path());
+		if (message.getSuccess()) {
+			String current = hintMap.getOrDefault(message.getPasswordId(), "");
+			if (!(current.indexOf(message.getHint()) > -1)) current += message.getHint();
+			hintMap.put(message.getPasswordId(), current);
+			Boolean finished = (current.length() == this.hintCount);
+			for(TaskMessage task: this.taskQueue) {
+				if (task.getId() == message.getPasswordId() & (task.getMissingChar() == message.getHint() | finished)) {
+					this.taskQueue.remove(task);
+				}
+			}
+		} else {
+			for(TaskMessage task: this.taskQueue) {
+				if (task.getId() == message.getPasswordId() & task.getMissingChar() == message.getHint()) {
+					this.taskQueue.remove(task);
+				}
+			}		
+		}
+		this.actorsBusyMap.put(message.getSender(), false);
+		Integer size = this.actorsBusyMap.size();
+		this.log().info(size.toString());
+		this.schedule();
 	}
 	
 	protected void handle(BatchMessage message) {
-		
-		///////////////////////////////////////////////////////////////////////////////////////////////////////
-		// The input file is read in batches for two reasons: /////////////////////////////////////////////////
-		// 1. If we distribute the batches early, we might not need to hold the entire input data in memory. //
-		// 2. If we process the batches early, we can achieve latency hiding. /////////////////////////////////
-		// TODO: Implement the processing of the data for the concrete assignment. ////////////////////////////
-		///////////////////////////////////////////////////////////////////////////////////////////////////////
 		
 		if (message.getLines().isEmpty()) {
 			this.collector.tell(new Collector.PrintMessage(), this.self());
@@ -166,35 +184,23 @@ public class Master extends AbstractLoggingActor {
 		}
 		
 		for (String[] line : message.getLines()) {
-			//TODO Remove test limitation
-			if (!line[0].equals("1")) {
-				//continue;
-			}
-			this.log().info("Now processing password ID " + line[0].toString() + " - " + line[1].toString());
+
 			int id = Integer.parseInt(line[0]);
 			char[] charset = line[2].toCharArray();
 			byte length = Byte.parseByte(line[3]);
 			String password = line[4];
-			String[] hints = new String[line.length-5];
+			this.hintCount = line.length-5;
+			String[] hints = new String[line.length-5]; //Hints start in column 5
 			
-			for (int i = 5; i < line.length; i++) {
+			for (int i = 5; i < line.length; i++) { //Hints start in column 5
 				hints[i-5]=line[i];
 			}
 
-			this.log().info("\tCharset is " + Arrays.toString(charset) + ", lenght is " + length + ", number of hints is " + hints.length);
-
-			ArrayList<TaskMessage> tasks = this.hintTasks(id, charset, length, password, hints);
-
-			int tasksSize = tasks.size();
-			this.log().info("Generated " + tasksSize + " subtasks");
-
-			for (int i=0; i < tasksSize; i++) {
-				int workerNum = i % this.workers.size();
-				tasks.get(i).setSubtaskId(i);
-				this.workers.get(workerNum).tell(tasks.get(i), this.self());
-			}
+			ArrayList<TaskMessage> tasks = this.hintTasks(id, charset, length, password, hints);			
+			this.taskQueue.addAll(tasks);
 		}
-		
+		this.log().info("Initial scheduling");	
+		this.schedule();		
 		this.collector.tell(new Collector.CollectMessage("Processed batch of size " + message.getLines().size()), this.self());
 		this.reader.tell(new Reader.ReadMessage(), this.self());
 	}
