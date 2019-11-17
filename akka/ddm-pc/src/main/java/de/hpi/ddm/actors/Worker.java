@@ -1,10 +1,13 @@
 package de.hpi.ddm.actors;
 
+import java.io.Serializable;
 import java.io.UnsupportedEncodingException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.List;
+
+import org.apache.commons.lang3.ArrayUtils;
 
 import akka.actor.AbstractLoggingActor;
 import akka.actor.ActorRef;
@@ -17,12 +20,28 @@ import akka.cluster.ClusterEvent.MemberUp;
 import akka.cluster.Member;
 import akka.cluster.MemberStatus;
 import de.hpi.ddm.MasterSystem;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 
 public class Worker extends AbstractLoggingActor {
 
 	////////////////////////
 	// Actor Construction //
 	////////////////////////
+
+	@Data @NoArgsConstructor @AllArgsConstructor
+	public static class WorkerTask implements Serializable {
+		private static final long serialVersionUID = 1234567890L; //Wofür ist die eigentlich da?
+		private Boolean crackPassword;
+		private String[] sha256;
+		private char[] charset;
+		private char missingChar;
+		private String fixedStart;
+		private int id;
+		private ActorRef master;
+		private ActorRef sender;
+	}
 	
 	public static final String DEFAULT_NAME = "worker";
 
@@ -96,18 +115,17 @@ public class Worker extends AbstractLoggingActor {
 		ArrayList<String> permutated = new ArrayList<>();
 		this.heapPermutation(message.getCharset(), message.getCharset().length, message.getCharset().length, permutated);
 		String prepend = message.getFixedStart();
-		Boolean stop = false;
 		for (String permutate : permutated) {
-			String calcHash = this.hash(prepend+permutate);
+			String calcHash = this.hash(prepend + permutate);
 			for (String hash : message.getSha256()) {
 				if (calcHash.equals(hash)) {
-                    this.log().info(prepend+permutate+" is a hint for password " + message.getId() + " - Char is: "+message.getMissingChar());
-                    message.getSender().tell(new Master.ResponseMessage(message.getMissingChar(), message.getId(), true, this.self()), this.self());
+                    this.log().info(prepend+permutate+" is a hint for password " + message.getId() + " - Char is: "+message.getHint());
+                    message.getSender().tell(new Master.ResponseMessage(message.getHint(), message.getId(), true, this.self()), this.self());
 					return;
 				}
 			}
         }
-        message.getSender().tell(new Master.ResponseMessage(message.getMissingChar(), message.getId(), false, this.self()), this.self());
+        message.getSender().tell(new Master.ResponseMessage(message.getHint(), message.getId(), false, this.self()), this.self());
 	}
 
 	private void register(Member member) {
