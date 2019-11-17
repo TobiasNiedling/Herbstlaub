@@ -3,7 +3,11 @@ package de.hpi.ddm.actors;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+
+import com.esotericsoftware.reflectasm.shaded.org.objectweb.asm.ByteVector;
 
 import org.apache.commons.lang3.ArrayUtils;
 
@@ -12,6 +16,7 @@ import akka.actor.ActorRef;
 import akka.actor.PoisonPill;
 import akka.actor.Props;
 import akka.actor.Terminated;
+import akka.stream.stage.TimerMessages.Scheduled;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -22,7 +27,11 @@ public class Master extends AbstractLoggingActor {
 	// Actor Construction //
 	////////////////////////
 	
-	public static final String DEFAULT_NAME = "master";
+    public static final String DEFAULT_NAME = "master";
+    
+    private HashMap<Integer,String> hints = new HashMap<>();
+    private ArrayList<TaskMessage> taskQueue = new ArrayList<>();
+    private HashMap<ActorRef, Integer> actorTasks = new HashMap<>();
 
 	public static Props props(final ActorRef reader, final ActorRef collector) {
 		return Props.create(Master.class, () -> new Master(reader, collector));
@@ -47,8 +56,8 @@ public class Master extends AbstractLoggingActor {
 	public static class BatchMessage implements Serializable {
 		private static final long serialVersionUID = 8343040942748609598L;
 		private List<String[]> lines;
-	}
-
+    }
+    
 	@Data @NoArgsConstructor @AllArgsConstructor
 	public static class TaskMessage implements Serializable {
 		private static final long serialVersionUID = 123456789L; //Wofür ist die eigentlich da?
@@ -58,16 +67,17 @@ public class Master extends AbstractLoggingActor {
 		private char missingChar;
 		private String fixedStart;
 		private int id;
-		private int subtaskId;
+        private int subtaskId;
+        private ActorRef sender;
 	}
 
 	@Data @NoArgsConstructor @AllArgsConstructor
 	public static class ResponseMessage implements Serializable {
 		private static final long serialVersionUID = 987654321L; //Wofür ist die eigentlich da?
-		private Boolean success;
-		private String cracked;
-		private int id;
-		private int subtaskId;
+		private char hint;
+        private int passwordId;
+        private Boolean success;
+        private ActorRef sender;
 	}
 
 	@Data
@@ -104,7 +114,8 @@ public class Master extends AbstractLoggingActor {
 				.match(StartMessage.class, this::handle)
 				.match(BatchMessage.class, this::handle)
 				.match(Terminated.class, this::handle)
-				.match(RegistrationMessage.class, this::handle)
+                .match(RegistrationMessage.class, this::handle)
+                .match(ResponseMessage.class, this::handle)
 				.matchAny(object -> this.log().info("Received unknown message: \"{}\"", object.toString()))
 				.build();
 	}
@@ -127,7 +138,7 @@ public class Master extends AbstractLoggingActor {
 					char[] newCharset = new char[task.getCharset().length-1];
 					newCharset = ArrayUtils.remove(task.getCharset(), i);
 					String startString = task.getFixedStart() + task.getCharset()[i];
-					subdivide.add(new TaskMessage(task.getCrackPassword(), task.getSha256(), newCharset, task.getMissingChar(), startString, task.getId(), 0));
+					subdivide.add(new TaskMessage(task.getCrackPassword(), task.getSha256(), newCharset, task.getMissingChar(), startString, task.getId(), 0, this.self()));
 				}
 				result.addAll(this.subdivideTasks(subdivide, breakLength));
 			}
@@ -141,34 +152,58 @@ public class Master extends AbstractLoggingActor {
 		for (int j = 0; j < charset.length; j++) {
 			char[] reducedCharset = new char[charset.length-1];
 			reducedCharset = ArrayUtils.remove(charset, j);
-			result.add(new TaskMessage(false,hints,reducedCharset,charset[j],"",id, 0));
+			result.add(new TaskMessage(false,hints,reducedCharset,charset[j],"",id, 0, this.self()));
 		}
 
 		//Find a break length, that the master is not stucked ("3"), but the workers stillt have something to do ("8")
 		int breakLength = Math.min(3,result.get(0).getCharset().length-8);
 
-		return this.subdivideTasks(result, breakLength);
-	}
+        return this.subdivideTasks(result, breakLength);
+        //return result;
+    }
+
+    private void schedule() {
+        for (ActorRef actor: this.workers) {
+            Integer currentTasks = this.actorTasks.getOrDefault(actor, 0);
+            if (currentTasks < 3) {
+                TaskMessage task = this.taskQueue.remove(0);
+                actor.tell(task, this.self());
+                this.taskQueue.add(task); // Append task again in case worker fails
+                this.actorTasks.put(actor, currentTasks+1);
+            }
+        }
+    }
+    
+    protected void handle(ResponseMessage message) {
+        if (message.getSuccess()) {
+            String current = this.hints.getOrDefault(message.getPasswordId(), "");
+            if (!(current.indexOf(message.getHint()) > -1)) {
+                current += message.getHint();
+                this.hints.put(message.getPasswordId(), current);
+            }
+        }
+        for (int i = 1; i <= this.hints.size(); i++) {
+            this.log().info(hints.get(i));
+        }
+        Integer taskCount = this.actorTasks.getOrDefault(message.getSender(), -1);
+        this.actorTasks.put(message.getSender(), taskCount-1);
+        schedule();
+    }
 	
 	protected void handle(BatchMessage message) {
-		
-		///////////////////////////////////////////////////////////////////////////////////////////////////////
-		// The input file is read in batches for two reasons: /////////////////////////////////////////////////
-		// 1. If we distribute the batches early, we might not need to hold the entire input data in memory. //
-		// 2. If we process the batches early, we can achieve latency hiding. /////////////////////////////////
-		// TODO: Implement the processing of the data for the concrete assignment. ////////////////////////////
-		///////////////////////////////////////////////////////////////////////////////////////////////////////
 		
 		if (message.getLines().isEmpty()) {
 			this.collector.tell(new Collector.PrintMessage(), this.self());
 			this.terminate();
 			return;
-		}
+        }
+        
+        ArrayList<TaskMessage> tasks = new ArrayList<>();
 		
 		for (String[] line : message.getLines()) {
 			//TODO Remove test limitation
 			if (!line[0].equals("1")) {
-				//continue;
+				continue;
 			}
 			this.log().info("Now processing password ID " + line[0].toString() + " - " + line[1].toString());
 			int id = Integer.parseInt(line[0]);
@@ -183,24 +218,24 @@ public class Master extends AbstractLoggingActor {
 
 			this.log().info("\tCharset is " + Arrays.toString(charset) + ", lenght is " + length + ", number of hints is " + hints.length);
 
-			ArrayList<TaskMessage> tasks = this.hintTasks(id, charset, length, password, hints);
+			tasks.addAll(this.hintTasks(id, charset, length, password, hints));
 
 			int tasksSize = tasks.size();
-			this.log().info("Generated " + tasksSize + " subtasks");
+            this.log().info("Generated " + tasksSize + " subtasks");
+        }
 
-			for (int i=0; i < tasksSize; i++) {
-				int workerNum = i % this.workers.size();
-				tasks.get(i).setSubtaskId(i);
-				this.workers.get(workerNum).tell(tasks.get(i), this.self());
-			}
-		}
+        Collections.shuffle(tasks);
+        this.taskQueue.addAll(tasks);
+        this.schedule();
+        this.schedule();
+        this.schedule();
 		
 		this.collector.tell(new Collector.CollectMessage("Processed batch of size " + message.getLines().size()), this.self());
 		this.reader.tell(new Reader.ReadMessage(), this.self());
 	}
 	
 	protected void terminate() {
-		this.reader.tell(PoisonPill.getInstance(), ActorRef.noSender());
+		/*this.reader.tell(PoisonPill.getInstance(), ActorRef.noSender());
 		this.collector.tell(PoisonPill.getInstance(), ActorRef.noSender());
 		
 		for (ActorRef worker : this.workers) {
@@ -211,7 +246,7 @@ public class Master extends AbstractLoggingActor {
 		this.self().tell(PoisonPill.getInstance(), ActorRef.noSender());
 		
 		long executionTime = System.currentTimeMillis() - this.startTime;
-		this.log().info("Algorithm finished in {} ms", executionTime);
+		this.log().info("Algorithm finished in {} ms", executionTime);*/
 	}
 
 	protected void handle(RegistrationMessage message) {

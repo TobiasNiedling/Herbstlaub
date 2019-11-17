@@ -71,7 +71,8 @@ public class Worker extends AbstractLoggingActor {
 				.match(CurrentClusterState.class, this::handle)
 				.match(MemberUp.class, this::handle)
 				.match(MemberRemoved.class, this::handle)
-				.match(Master.TaskMessage.class, this::handle)
+                .match(Master.TaskMessage.class, this::handle)
+                .match(String.class, this::handle)
 				.matchAny(object -> this.log().info("Received unknown message: \"{}\"", object.toString()))
 				.build();
 	}
@@ -85,7 +86,11 @@ public class Worker extends AbstractLoggingActor {
 
 	private void handle(MemberUp message) {
 		this.register(message.member());
-	}
+    }
+    
+    private void handle(String message) {
+        this.log().info(message);
+    }
 
 	private void handle(Master.TaskMessage message) {
 		ArrayList<String> permutated = new ArrayList<>();
@@ -96,13 +101,13 @@ public class Worker extends AbstractLoggingActor {
 			String calcHash = this.hash(prepend+permutate);
 			for (String hash : message.getSha256()) {
 				if (calcHash.equals(hash)) {
-					this.log().info(prepend+permutate+" is a hint for password " + message.getId() + " - Char is: "+message.getMissingChar());
-					stop = true;
+                    this.log().info(prepend+permutate+" is a hint for password " + message.getId() + " - Char is: "+message.getMissingChar());
+                    message.getSender().tell(new Master.ResponseMessage(message.getMissingChar(), message.getId(), true, this.self()), this.self());
+					return;
 				}
-				if (stop) break;
 			}
-			if (stop) break;
-		}
+        }
+        message.getSender().tell(new Master.ResponseMessage(message.getMissingChar(), message.getId(), false, this.self()), this.self());
 	}
 
 	private void register(Member member) {
