@@ -207,8 +207,9 @@ public class Master extends AbstractLoggingActor {
 			ArrayList<TaskMessage> tasks = this.hintTasks(id, charset, length, password, hints);
 			this.log().info("Generated " + tasks.size() + " subtasks");
 
-			for (TaskMessage taskMessage : tasks) {
-				//this.workers
+			for (int i = 0; i < tasks.size(); i++) {
+				int workerNum = i % this.workers.size();
+				this.workers.get(workerNum).tell(tasks.get(i), this.self());
 			}
 		}	
 		this.collector.tell(new Collector.CollectMessage("Processed batch of size " + message.getLines().size()), this.self());

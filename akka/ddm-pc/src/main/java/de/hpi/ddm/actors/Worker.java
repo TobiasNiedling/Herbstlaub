@@ -91,29 +91,9 @@ public class Worker extends AbstractLoggingActor {
 				.match(MemberUp.class, this::handle)
 				.match(MemberRemoved.class, this::handle)
 				.match(Master.TaskMessage.class, this::handle)
-				.match(WorkerTask.class, this::handle)
+				//.match(WorkerTask.class, this::handle)
 				.matchAny(object -> this.log().info("Received unknown message: \"{}\"", object.toString()))
 				.build();
-	}
-
-	private ArrayList<WorkerTask> subdivideTasks(ArrayList<WorkerTask> tasks, int breakLength) {
-		ArrayList<WorkerTask> result = new ArrayList<>();
-
-		for (WorkerTask task : tasks) {
-			if (task.getFixedStart().length() >= breakLength) {
-				this.self().tell(task, this.self());
-			} else {
-				ArrayList<WorkerTask> subdivide = new ArrayList<>();
-				for (int i = 0; i<task.getCharset().length; i++) {
-					char[] newCharset = new char[task.getCharset().length-1];
-					newCharset = ArrayUtils.remove(task.getCharset(), i);
-					String startString = task.getFixedStart() + task.getCharset()[i];
-					subdivide.add(new WorkerTask(task.getCrackPassword(), task.getSha256(), newCharset, task.getMissingChar(), startString, task.getId(), task.getMaster(), this.self()));
-				}
-				result.addAll(this.subdivideTasks(subdivide, breakLength));
-			}
-		}			
-		return result;
 	}
 
 	private void handle(CurrentClusterState message) {
@@ -127,28 +107,29 @@ public class Worker extends AbstractLoggingActor {
 		this.register(message.member());
 	}
 
-	private void handle(Master.TaskMessage message) {
+	/*private void handle(Master.TaskMessage message) {
 		ArrayList<WorkerTask> tasks = new ArrayList<>();
 		WorkerTask task = new WorkerTask(message.getCrackPassword(), message.getSha256(), message.getCharset(), message.getMissingChar(), "", message.getId(), this.self(), message.getSender());		
 		tasks.add(task);
 		this.subdivideTasks(tasks, 3); //3 seems to be a good value
 		this.log().info("Worker " + this.self().path() + " generated subtasks");
-	}
+	}*/
 
-	private void handle(WorkerTask message) {
+	private void handle(Master.TaskMessage message) {
 		ArrayList<String> permutated = new ArrayList<>();
 		this.heapPermutation(message.getCharset(), message.getCharset().length, message.getCharset().length, permutated);
+		String prepend = message.getFixedStart();
 		for (String permutate : permutated) {
-			String calcHash = this.hash(permutate);
+			String calcHash = this.hash(prepend + permutate);
 			for (String hash : message.getSha256()) {
 				if (calcHash.equals(hash)) {
-					this.log().info(permutate+" is a hint for password " + message.getId() + " - Char is: "+message.getMissingChar());
-					message.getSender().tell(new Master.ResponseMessage(true, message.getMissingChar(), message.getId(), this.self()), this.self());
+					this.log().info(prepend + permutate+" is a hint for password " + message.getId() + " - Char is: "+message.getHint());
+					message.getSender().tell(new Master.ResponseMessage(true, message.getHint(), message.getId(), this.self()), this.self());
 					return;
 				}
 			}
 		}
-		message.getMaster().tell(new Master.ResponseMessage(false, message.getMissingChar(), message.getId(), this.self()), this.self());
+		message.getSender().tell(new Master.ResponseMessage(false, message.getHint(), message.getId(), this.self()), this.self());
 		return;
 	}
 
