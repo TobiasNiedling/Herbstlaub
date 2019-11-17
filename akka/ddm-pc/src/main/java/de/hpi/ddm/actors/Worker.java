@@ -7,8 +7,6 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.commons.lang3.ArrayUtils;
-
 import akka.actor.AbstractLoggingActor;
 import akka.actor.ActorRef;
 import akka.actor.PoisonPill;
@@ -112,20 +110,31 @@ public class Worker extends AbstractLoggingActor {
     }
 
 	private void handle(Master.TaskMessage message) {
-		ArrayList<String> permutated = new ArrayList<>();
-		this.heapPermutation(message.getCharset(), message.getCharset().length, message.getCharset().length, permutated);
-		String prepend = message.getFixedStart();
-		for (String permutate : permutated) {
-			String calcHash = this.hash(prepend + permutate);
-			for (String hash : message.getSha256()) {
-				if (calcHash.equals(hash)) {
-                    this.log().info(prepend+permutate+" is a hint for password " + message.getId() + " - Char is: "+message.getHint());
-                    message.getSender().tell(new Master.ResponseMessage(message.getHint(), message.getId(), true, this.self()), this.self());
-					return;
-				}
-			}
+        if (message.getCrackPassword()) {
+            ArrayList<String> permutated = new ArrayList<>();
+            this.printAllKLengthRec(message.getCharset(), "", message.getCharset().length, message.getSubtaskId(), permutated);
+            String passwordHash = message.getSha256()[0];
+            for (String permutate : permutated) {
+                String permutateHash = this.hash(permutate);
+                if (permutateHash.equals(passwordHash)) {
+                    message.getSender().tell(new Master.CrackedMessage(permutate, message.getId(), true, this.self()), this.self());
+                }
+            }
+        } else {
+            ArrayList<String> permutated = new ArrayList<>();
+            this.heapPermutation(message.getCharset(), message.getCharset().length, message.getCharset().length, permutated);
+            String prepend = message.getFixedStart();
+            for (String permutate : permutated) {
+                String calcHash = this.hash(prepend + permutate);
+                for (String hash : message.getSha256()) {
+                    if (calcHash.equals(hash)) {
+                        message.getSender().tell(new Master.ResponseMessage(message.getHint(), message.getId(), true, this.self()), this.self());
+                        return;
+                    }
+                }
+            }
+            message.getSender().tell(new Master.ResponseMessage(message.getHint(), message.getId(), false, this.self()), this.self());
         }
-        message.getSender().tell(new Master.ResponseMessage(message.getHint(), message.getId(), false, this.self()), this.self());
 	}
 
 	private void register(Member member) {
@@ -157,7 +166,22 @@ public class Worker extends AbstractLoggingActor {
 		catch (NoSuchAlgorithmException | UnsupportedEncodingException e) {
 			throw new RuntimeException(e.getMessage());
 		}
-	}
+    }
+    
+    //von der Quelle in den Folien geklaut, ähm "adaptiert"
+    private void printAllKLengthRec(char[] set, String prefix, int n, int k, ArrayList<String> l) { 
+
+        if (k == 0) { 
+            l.add(prefix);
+            return; 
+        } 
+
+        for (int i = 0; i < n; ++i) { 
+
+            String newPrefix = prefix + set[i];  
+            printAllKLengthRec(set, newPrefix, n, k - 1, l);  
+        } 
+    } 
 	
 	private void heapPermutation(char[] a, int size, int n, List<String> l) {
 		//What the hell does parameter n do?

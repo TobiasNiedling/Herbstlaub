@@ -34,7 +34,10 @@ public class Master extends AbstractLoggingActor {
     private HashMap<Integer,String> hints = new HashMap<>();
     private ArrayList<TaskMessage> taskQueue = new ArrayList<>();
     private HashMap<ActorRef, Integer> actorTasks = new HashMap<>();
+    private HashMap<Integer,String> passwordHash = new HashMap<>();
+    private char[] globalCharset;
     private Integer hintCount;
+    private Integer passwordLength;
 
 	public static Props props(final ActorRef reader, final ActorRef collector) {
 		return Props.create(Master.class, () -> new Master(reader, collector));
@@ -81,7 +84,16 @@ public class Master extends AbstractLoggingActor {
         private int passwordId;
         private Boolean success;
         private ActorRef sender;
-	}
+    }
+    
+	@Data @NoArgsConstructor @AllArgsConstructor
+	public static class CrackedMessage implements Serializable {
+		private static final long serialVersionUID = 987654321L; //Wofür ist die eigentlich da?
+		private String password;
+        private int passwordId;
+        private Boolean success;
+        private ActorRef sender;
+    }
 
 	@Data
 	public static class RegistrationMessage implements Serializable {
@@ -119,6 +131,7 @@ public class Master extends AbstractLoggingActor {
 				.match(Terminated.class, this::handle)
                 .match(RegistrationMessage.class, this::handle)
                 .match(ResponseMessage.class, this::handle)
+                .match(CrackedMessage.class, this::handle)
 				.matchAny(object -> this.log().info("Received unknown message: \"{}\"", object.toString()))
 				.build();
 	}
@@ -150,13 +163,13 @@ public class Master extends AbstractLoggingActor {
 		return result;
 	}
 
-	private ArrayList<TaskMessage> hintTasks(int id, char[] charset, byte length, String password, String[] hints) {
+	private ArrayList<TaskMessage> hintTasks(int id, char[] charset, int length, String[] hintInput) {
 
 		ArrayList<TaskMessage> result = new ArrayList<>();
 		for (int i = 0; i < charset.length; i++) {
 			char[] reducedCharset = new char[charset.length-1];
 			reducedCharset = ArrayUtils.remove(charset, i);
-			result.add(new TaskMessage(false,hints,reducedCharset,charset[i],"",id, 0, this.self()));
+			result.add(new TaskMessage(false,hintInput,reducedCharset,charset[i],"",id, 0, this.self()));
 		}
 
 		return this.subdivide(result);
@@ -177,7 +190,46 @@ public class Master extends AbstractLoggingActor {
             }
         }
     }
+
+    private void crackPasswords() {
+        for (int i = 1; i <= this.hints.size(); i++) {
+
+            char[] crackCharset = new char[this.globalCharset.length - this.hints.get(i).length()];
+            int j=0;
+            for (char hintChar : globalCharset) {
+                if (this.hints.get(i).indexOf(hintChar) > -1) {
+                    continue;
+                } else {
+                    crackCharset[j] = hintChar;
+                    j++;
+                }
+            }
+            String[] hashStrings = new String[1];
+            hashStrings[0] = this.passwordHash.get(i);
+            TaskMessage task = new TaskMessage(true, hashStrings, crackCharset, ' ', "", i, this.passwordLength, this.self());
+            this.taskQueue.add(task);
+            this.schedule();
+        }
+    }
     
+    protected void handle(CrackedMessage message) {
+        if (message.getSuccess()) {
+            String password = message.getPassword();
+            int passwordId = message.getPasswordId();
+            this.log().info("Cracked password number " + passwordId + ", it is: " + password);
+            ArrayList<TaskMessage> newQueue = new ArrayList<>();
+            Iterator<TaskMessage> i = this.taskQueue.iterator();
+            while(i.hasNext()) {
+                TaskMessage task = i.next();
+                if (task.getId() != message.getPasswordId()) {
+                    newQueue.add(task);
+                }
+            }
+            this.taskQueue = newQueue;
+            this.collector.tell(new Collector.CollectMessage(password), this.self());
+        }
+    }
+
     protected void handle(ResponseMessage message) {
         if (message.getSuccess()) {
             String current = this.hints.getOrDefault(message.getPasswordId(), "");
@@ -186,7 +238,6 @@ public class Master extends AbstractLoggingActor {
                 this.hints.put(message.getPasswordId(), current);
             }
             Boolean finishedPwd = (current.length() == this.hintCount);
-            this.log().info("Task queue length [before]: "+this.taskQueue.size());
             ArrayList<TaskMessage> newQueue = new ArrayList<>();
             Iterator<TaskMessage> i = this.taskQueue.iterator();
             while(i.hasNext()) {
@@ -196,10 +247,10 @@ public class Master extends AbstractLoggingActor {
                 }
             }
             this.taskQueue = newQueue;
-            this.log().info(current);
-            this.log().info("Task queue length [after]: "+this.taskQueue.size());    
-            this.log().info("Hint count: "+this.hintCount);
-            this.log().info("Current length: "+current.length());        
+            this.log().info("Task queue length: "+this.taskQueue.size());  
+            if (this.taskQueue.size() == 0) {
+                this.crackPasswords();
+            } 
         }
         Integer taskCount = this.actorTasks.getOrDefault(message.getSender(), -1);
         this.actorTasks.put(message.getSender(), taskCount-1);
@@ -218,24 +269,25 @@ public class Master extends AbstractLoggingActor {
 		
 		for (String[] line : message.getLines()) {
 			//TODO Remove test limitation
-			if (!line[0].equals("1") & !line[0].equals("2")) {
+			if (!line[0].equals("1")) {
 				continue;
 			}
 			this.log().info("Now processing password ID " + line[0].toString() + " - " + line[1].toString());
 			int id = Integer.parseInt(line[0]);
-			char[] charset = line[2].toCharArray();
-            byte length = Byte.parseByte(line[3]);
+            char[] charset = line[2].toCharArray();
+            this.globalCharset = new char[charset.length];
+            this.globalCharset = charset;
+            int length = Byte.parseByte(line[3]);
+            this.passwordLength = length;
             this.hintCount = line.length-5; //Hints start in column 5
-			String password = line[4];
-			String[] hints = new String[this.hintCount]; 
+			this.passwordHash.put(Integer.parseInt(line[0]), line[4]);
+			String[] hintInput = new String[this.hintCount]; 
 			
 			for (int i = 5; i < line.length; i++) { //Hints start in column 5
-				hints[i-5]=line[i];
+				hintInput[i-5]=line[i];
 			}
 
-			this.log().info("\tCharset is " + Arrays.toString(charset) + ", lenght is " + length + ", number of hints is " + hints.length);
-
-			tasks.addAll(this.hintTasks(id, charset, length, password, hints));
+			tasks.addAll(this.hintTasks(id, charset, length, hintInput));
 
 			int tasksSize = tasks.size();
             this.log().info("Generated " + tasksSize + " subtasks");
