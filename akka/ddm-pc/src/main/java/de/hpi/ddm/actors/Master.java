@@ -71,10 +71,8 @@ public class Master extends AbstractLoggingActor {
 	@Data @NoArgsConstructor @AllArgsConstructor
 	public static class ResponseMessage implements Serializable {
 		private static final long serialVersionUID = 987654321L; //Wofür ist die eigentlich da?
-		private Boolean success;
 		private char hint;
 		private int passwordId;
-		private ActorRef sender;
 	}
 
 	@Data
@@ -112,7 +110,7 @@ public class Master extends AbstractLoggingActor {
 				.match(BatchMessage.class, this::handle)
 				.match(Terminated.class, this::handle)
 				.match(RegistrationMessage.class, this::handle)
-				.match(ResponseMessage.class, this::handle)
+				.match(String.class, this::handle)
 				.matchAny(object -> this.log().info("Received unknown message: \"{}\"", object.toString()))
 				.build();
 	}
@@ -128,7 +126,7 @@ public class Master extends AbstractLoggingActor {
 		ArrayList<TaskMessage> result = new ArrayList<>();
 
 		for (TaskMessage task : tasks) {
-			if (task.getFixedStart().length() >= 2) {
+			if (task.getFixedStart().length() >= 3) {
 				result.add(task);
 			} else {
 				ArrayList<TaskMessage> subdivide = new ArrayList<>();
@@ -157,28 +155,8 @@ public class Master extends AbstractLoggingActor {
 
 	}
 
-	protected void handle(ResponseMessage message) {
-		this.log().info("Got response from actor " + message.getSender().path());
-		if (message.getSuccess()) {
-			String current = hintMap.getOrDefault(message.getPasswordId(), "");
-			if (!(current.indexOf(message.getHint()) > -1)) current += message.getHint();
-			hintMap.put(message.getPasswordId(), current);
-			Boolean finished = (current.length() == this.hintCount);
-			for(TaskMessage task: this.taskQueue) {
-				if (task.getId() == message.getPasswordId() & (task.getHint() == message.getHint() | finished)) {
-					this.taskQueue.remove(task);
-				}
-			}
-		} else {
-			for(TaskMessage task: this.taskQueue) {
-				if (task.getId() == message.getPasswordId() & task.getHint() == message.getHint()) {
-					this.taskQueue.remove(task);
-				}
-			}		
-		}
-		this.actorsBusyMap.put(message.getSender(), false);
-		Integer size = this.actorsBusyMap.size();
-		this.log().info(size.toString());
+	protected void handle(String message) {
+		this.log().info("Response!");
 	}
 	
 	protected void handle(BatchMessage message) {

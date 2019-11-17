@@ -91,7 +91,6 @@ public class Worker extends AbstractLoggingActor {
 				.match(MemberUp.class, this::handle)
 				.match(MemberRemoved.class, this::handle)
 				.match(Master.TaskMessage.class, this::handle)
-				//.match(WorkerTask.class, this::handle)
 				.matchAny(object -> this.log().info("Received unknown message: \"{}\"", object.toString()))
 				.build();
 	}
@@ -107,14 +106,6 @@ public class Worker extends AbstractLoggingActor {
 		this.register(message.member());
 	}
 
-	/*private void handle(Master.TaskMessage message) {
-		ArrayList<WorkerTask> tasks = new ArrayList<>();
-		WorkerTask task = new WorkerTask(message.getCrackPassword(), message.getSha256(), message.getCharset(), message.getMissingChar(), "", message.getId(), this.self(), message.getSender());		
-		tasks.add(task);
-		this.subdivideTasks(tasks, 3); //3 seems to be a good value
-		this.log().info("Worker " + this.self().path() + " generated subtasks");
-	}*/
-
 	private void handle(Master.TaskMessage message) {
 		ArrayList<String> permutated = new ArrayList<>();
 		this.heapPermutation(message.getCharset(), message.getCharset().length, message.getCharset().length, permutated);
@@ -124,12 +115,11 @@ public class Worker extends AbstractLoggingActor {
 			for (String hash : message.getSha256()) {
 				if (calcHash.equals(hash)) {
 					this.log().info(prepend + permutate+" is a hint for password " + message.getId() + " - Char is: "+message.getHint());
-					message.getSender().tell(new Master.ResponseMessage(true, message.getHint(), message.getId(), this.self()), this.self());
+					message.getSender().tell("Fuck you", this.self());
 					return;
 				}
 			}
 		}
-		message.getSender().tell(new Master.ResponseMessage(false, message.getHint(), message.getId(), this.self()), this.self());
 		return;
 	}
 
