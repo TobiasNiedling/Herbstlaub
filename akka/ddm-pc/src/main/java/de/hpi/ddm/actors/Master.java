@@ -53,8 +53,9 @@ public class Master extends AbstractLoggingActor {
 	public static class TaskMessage implements Serializable {
 		private static final long serialVersionUID = 123456789L; //Wofür ist die eigentlich da?
 		private Boolean crackPassword;
-		private String sha256;
+		private String[] sha256;
 		private char[] charset;
+		private char hint;
 		private String fixedStart;
 		private int id;
 	}
@@ -116,7 +117,7 @@ public class Master extends AbstractLoggingActor {
 		ArrayList<TaskMessage> result = new ArrayList<>();
 
 		for (TaskMessage task : tasks) {
-			if (task.getFixedStart().length() >= 4) {
+			if (task.getFixedStart().length() >= 2) {
 				result.add(task);
 			} else {
 				ArrayList<TaskMessage> subdivide = new ArrayList<>();
@@ -124,7 +125,7 @@ public class Master extends AbstractLoggingActor {
 					char[] newCharset = new char[task.getCharset().length-1];
 					newCharset = ArrayUtils.remove(task.getCharset(), i);
 					String startString = task.getFixedStart() + task.getCharset()[i];
-					subdivide.add(new TaskMessage(task.getCrackPassword(), task.getSha256(), newCharset, startString, task.getId()));
+					subdivide.add(new TaskMessage(task.getCrackPassword(), task.getSha256(), newCharset, task.getHint(), startString, task.getId()));
 				}
 				result.addAll(this.subdivideTasks(subdivide));
 			}
@@ -135,21 +136,18 @@ public class Master extends AbstractLoggingActor {
 	private ArrayList<TaskMessage> hintTasks(int id, char[] charset, byte length, String password, ArrayList<String> hints) {
 
 		ArrayList<TaskMessage> result = new ArrayList<>();
-		for (int i = 0; i < hints.size(); i++) {
-			result.add(new TaskMessage(false,hints.get(i),charset,"",id));
+		for (int i = 0; i < charset.length; i++) {
+			char[] reducedCharset = new char[charset.length-1];
+			reducedCharset = ArrayUtils.remove(charset, i);
+			String[] hintsArray = new String[hints.size()];
+			hints.toArray(hintsArray);
+			result.add(new TaskMessage(false,hintsArray,reducedCharset,charset[i],"",id));
 		}
 
 		return this.subdivideTasks(result);
 	}
 	
 	protected void handle(BatchMessage message) {
-		
-		///////////////////////////////////////////////////////////////////////////////////////////////////////
-		// The input file is read in batches for two reasons: /////////////////////////////////////////////////
-		// 1. If we distribute the batches early, we might not need to hold the entire input data in memory. //
-		// 2. If we process the batches early, we can achieve latency hiding. /////////////////////////////////
-		// TODO: Implement the processing of the data for the concrete assignment. ////////////////////////////
-		///////////////////////////////////////////////////////////////////////////////////////////////////////
 		
 		if (message.getLines().isEmpty()) {
 			this.collector.tell(new Collector.PrintMessage(), this.self());
@@ -177,11 +175,6 @@ public class Master extends AbstractLoggingActor {
 			for (TaskMessage taskMessage : tasks) {
 				//this.workers
 			}
-
-			//Idee: Für jede Zeile einen Stapel von Aufgaben erzeugen
-			//Jede an einen Slave schicken -> advanced: überflüssige aufgaben canceln
-			//Probleme: Wie verteilt man die Aufgaben gut (unabhängig von der Hinweiszahl und Worker Zahl) --> Aufgaben möglichst klein halten
-			//Porbleme: Was wenn ein Worker failed?s
 		}
 		
 		this.collector.tell(new Collector.CollectMessage("Processed batch of size " + message.getLines().size()), this.self());
