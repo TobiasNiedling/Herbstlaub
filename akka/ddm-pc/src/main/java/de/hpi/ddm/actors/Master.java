@@ -62,7 +62,8 @@ public class Master extends AbstractLoggingActor {
 		private Boolean crackPassword;
 		private String[] sha256;
 		private char[] charset;
-		private char missingChar;
+		private char hint;
+		private String fixedStart;
 		private int id;
 		private ActorRef sender;
 	}
@@ -122,32 +123,38 @@ public class Master extends AbstractLoggingActor {
 		this.reader.tell(new Reader.ReadMessage(), this.self());
 	}
 
-	private ArrayList<TaskMessage> hintTasks(int id, char[] charset, byte length, String password, String[] hints) {
+	private ArrayList<TaskMessage> subdivide(ArrayList<TaskMessage> tasks) {
 
 		ArrayList<TaskMessage> result = new ArrayList<>();
-		for (int j = 0; j < charset.length; j++) {
-			char[] reducedCharset = new char[charset.length-1];
-			reducedCharset = ArrayUtils.remove(charset, j);
-			result.add(new TaskMessage(false,hints,reducedCharset,charset[j],id, this.self()));
-		}
 
+		for (TaskMessage task : tasks) {
+			if (task.getFixedStart().length() >= 2) {
+				result.add(task);
+			} else {
+				ArrayList<TaskMessage> subdivide = new ArrayList<>();
+				for (int i = 0; i<task.getCharset().length; i++) {
+					char[] newCharset = new char[task.getCharset().length-1];
+					newCharset = ArrayUtils.remove(task.getCharset(), i);
+					String startString = task.getFixedStart() + task.getCharset()[i];
+					subdivide.add(new TaskMessage(task.getCrackPassword(), task.getSha256(), newCharset, task.getHint(), startString, task.getId(), this.self()));
+				}
+				result.addAll(this.subdivide(subdivide));
+			}
+		}			
 		return result;
 	}
 
-	private void schedule() {
-		this.log().info("Scheduling...");
-		for (ActorRef actor : this.workers) {
-			this.log().info("Checking actor " + actor.path());
-			if (this.actorsBusyMap.getOrDefault(actor, false)) {
-				continue;
-			}	
-			this.log().info("Scheduling to actor " + actor.path());		
-			TaskMessage nextTask = this.taskQueue.remove(0);
-			this.taskQueue.add(nextTask); //Move nextTask to the end of queue, if worker fails
-			this.actorsBusyMap.put(actor, true);
-			actor.tell(nextTask, this.self());
+	private ArrayList<TaskMessage> hintTasks(int id, char[] charset, byte length, String password, String[] hints) {
+
+		ArrayList<TaskMessage> result = new ArrayList<>();
+		for (int i = 0; i < charset.length; i++) {
+			char[] reducedCharset = new char[charset.length-1];
+			reducedCharset = ArrayUtils.remove(charset, i);
+			result.add(new TaskMessage(false,hints,reducedCharset,charset[i],"",id, this.self()));
 		}
-		this.log().info("Finished scheduling");
+
+		return this.subdivide(result);
+
 	}
 
 	protected void handle(ResponseMessage message) {
@@ -158,13 +165,13 @@ public class Master extends AbstractLoggingActor {
 			hintMap.put(message.getPasswordId(), current);
 			Boolean finished = (current.length() == this.hintCount);
 			for(TaskMessage task: this.taskQueue) {
-				if (task.getId() == message.getPasswordId() & (task.getMissingChar() == message.getHint() | finished)) {
+				if (task.getId() == message.getPasswordId() & (task.getHint() == message.getHint() | finished)) {
 					this.taskQueue.remove(task);
 				}
 			}
 		} else {
 			for(TaskMessage task: this.taskQueue) {
-				if (task.getId() == message.getPasswordId() & task.getMissingChar() == message.getHint()) {
+				if (task.getId() == message.getPasswordId() & task.getHint() == message.getHint()) {
 					this.taskQueue.remove(task);
 				}
 			}		
@@ -172,7 +179,6 @@ public class Master extends AbstractLoggingActor {
 		this.actorsBusyMap.put(message.getSender(), false);
 		Integer size = this.actorsBusyMap.size();
 		this.log().info(size.toString());
-		this.schedule();
 	}
 	
 	protected void handle(BatchMessage message) {
@@ -196,11 +202,15 @@ public class Master extends AbstractLoggingActor {
 				hints[i-5]=line[i];
 			}
 
-			ArrayList<TaskMessage> tasks = this.hintTasks(id, charset, length, password, hints);			
-			this.taskQueue.addAll(tasks);
-		}
-		this.log().info("Initial scheduling");	
-		this.schedule();		
+			this.log().info("\tCharset is " + Arrays.toString(charset) + ", lenght is " + length + ", number of hints is " + hints.length);
+
+			ArrayList<TaskMessage> tasks = this.hintTasks(id, charset, length, password, hints);
+			this.log().info("Generated " + tasks.size() + " subtasks");
+
+			for (TaskMessage taskMessage : tasks) {
+				//this.workers
+			}
+		}	
 		this.collector.tell(new Collector.CollectMessage("Processed batch of size " + message.getLines().size()), this.self());
 		this.reader.tell(new Reader.ReadMessage(), this.self());
 	}
