@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -33,6 +34,7 @@ public class Master extends AbstractLoggingActor {
     private HashMap<Integer,String> hints = new HashMap<>();
     private ArrayList<TaskMessage> taskQueue = new ArrayList<>();
     private HashMap<ActorRef, Integer> actorTasks = new HashMap<>();
+    private Integer hintCount;
 
 	public static Props props(final ActorRef reader, final ActorRef collector) {
 		return Props.create(Master.class, () -> new Master(reader, collector));
@@ -162,13 +164,16 @@ public class Master extends AbstractLoggingActor {
     }
 
     private void schedule() {
-        for (ActorRef actor: this.workers) {
-            Integer currentTasks = this.actorTasks.getOrDefault(actor, 0);
-            if (currentTasks < 3) {
-                TaskMessage task = this.taskQueue.remove(0);
-                actor.tell(task, this.self());
-                this.taskQueue.add(task); // Append task again in case worker fails
-                this.actorTasks.put(actor, currentTasks+1);
+        if (this.taskQueue.size() > 0) {
+            for (ActorRef actor: this.workers) {
+                Integer currentTasks = this.actorTasks.getOrDefault(actor, 0);
+                while (currentTasks < 3) {
+                    TaskMessage task = this.taskQueue.remove(0);
+                    actor.tell(task, this.self());
+                    this.taskQueue.add(task); // Append task again in case worker fails
+                    currentTasks += 1;
+                    this.actorTasks.put(actor, currentTasks);
+                }
             }
         }
     }
@@ -180,9 +185,21 @@ public class Master extends AbstractLoggingActor {
                 current += message.getHint();
                 this.hints.put(message.getPasswordId(), current);
             }
-        }
-        for (int i = 1; i <= this.hints.size(); i++) {
-            this.log().info(hints.get(i));
+            Boolean finishedPwd = (current.length() == this.hintCount);
+            this.log().info("Task queue length [before]: "+this.taskQueue.size());
+            ArrayList<TaskMessage> newQueue = new ArrayList<>();
+            Iterator<TaskMessage> i = this.taskQueue.iterator();
+            while(i.hasNext()) {
+                TaskMessage task = i.next();
+                if (task.getId() != message.getPasswordId() | (!finishedPwd & task.getHint() != message.getHint())) {
+                    newQueue.add(task);
+                }
+            }
+            this.taskQueue = newQueue;
+            this.log().info(current);
+            this.log().info("Task queue length [after]: "+this.taskQueue.size());    
+            this.log().info("Hint count: "+this.hintCount);
+            this.log().info("Current length: "+current.length());        
         }
         Integer taskCount = this.actorTasks.getOrDefault(message.getSender(), -1);
         this.actorTasks.put(message.getSender(), taskCount-1);
@@ -201,15 +218,16 @@ public class Master extends AbstractLoggingActor {
 		
 		for (String[] line : message.getLines()) {
 			//TODO Remove test limitation
-			if (!line[0].equals("1")) {
+			if (!line[0].equals("1") & !line[0].equals("2")) {
 				continue;
 			}
 			this.log().info("Now processing password ID " + line[0].toString() + " - " + line[1].toString());
 			int id = Integer.parseInt(line[0]);
 			char[] charset = line[2].toCharArray();
-			byte length = Byte.parseByte(line[3]);
+            byte length = Byte.parseByte(line[3]);
+            this.hintCount = line.length-5; //Hints start in column 5
 			String password = line[4];
-			String[] hints = new String[line.length-5]; //Hints start in column 5
+			String[] hints = new String[this.hintCount]; 
 			
 			for (int i = 5; i < line.length; i++) { //Hints start in column 5
 				hints[i-5]=line[i];
