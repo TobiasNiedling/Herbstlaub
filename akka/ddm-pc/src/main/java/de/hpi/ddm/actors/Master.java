@@ -39,6 +39,13 @@ public class Master extends AbstractLoggingActor {
     private Integer hintCount;
     private Integer passwordLength;
 
+    //Parameter to determine how many subtasks should be queued (the length of fixed start is maximum this length)
+    //2 Worked fine on our home hardware
+    //3 works good to not get heart beet errors on lwo spec hardware
+    //4 leads to quite smaller tasks for the workers, but in order to not overtask the master, buffersize should be reduced to ~20
+    //Should be as low as possible to efficently use the hardware
+    private final int SUBDIVIDE_BREAK_LENGTH = 2; 
+
 	public static Props props(final ActorRef reader, final ActorRef collector) {
 		return Props.create(Master.class, () -> new Master(reader, collector));
 	}
@@ -147,7 +154,7 @@ public class Master extends AbstractLoggingActor {
 		ArrayList<TaskMessage> result = new ArrayList<>();
 
 		for (TaskMessage task : tasks) {
-			if (task.getFixedStart().length() >= 3) {
+			if (task.getFixedStart().length() >= Math.min(this.SUBDIVIDE_BREAK_LENGTH, this.passwordLength)) {
 				result.add(task);
 			} else {
 				ArrayList<TaskMessage> subdivide = new ArrayList<>();
@@ -155,7 +162,7 @@ public class Master extends AbstractLoggingActor {
 					char[] newCharset = new char[task.getCharset().length-1];
 					newCharset = ArrayUtils.remove(task.getCharset(), i);
 					String startString = task.getFixedStart() + task.getCharset()[i];
-					subdivide.add(new TaskMessage(task.getCrackPassword(), task.getSha256(), newCharset, task.getHint(), startString, task.getId(), 0, this.self()));
+					subdivide.add(new TaskMessage(task.getCrackPassword(), task.getSha256(), newCharset, task.getHint(), startString, task.getId(), i, this.self()));
 				}
 				result.addAll(this.subdivide(subdivide));
 			}
@@ -192,12 +199,11 @@ public class Master extends AbstractLoggingActor {
     }
 
     private void crackPasswords() {
-        for (int i = 1; i <= this.hints.size(); i++) {
-
-            char[] crackCharset = new char[this.globalCharset.length - this.hints.get(i).length()];
+        for (Map.Entry<Integer, String> entry: this.hints.entrySet()) {
+            char[] crackCharset = new char[this.globalCharset.length - entry.getValue().length()];
             int j=0;
             for (char hintChar : globalCharset) {
-                if (this.hints.get(i).indexOf(hintChar) > -1) {
+                if (entry.getValue().indexOf(hintChar) > -1) {
                     continue;
                 } else {
                     crackCharset[j] = hintChar;
@@ -205,29 +211,38 @@ public class Master extends AbstractLoggingActor {
                 }
             }
             String[] hashStrings = new String[1];
-            hashStrings[0] = this.passwordHash.get(i);
-            TaskMessage task = new TaskMessage(true, hashStrings, crackCharset, ' ', "", i, this.passwordLength, this.self());
+            hashStrings[0] = this.passwordHash.get(entry.getKey());
+            TaskMessage task = new TaskMessage(true, hashStrings, crackCharset, ' ', "", entry.getKey(), this.passwordLength, this.self());
             this.taskQueue.add(task);
             this.schedule();
         }
     }
     
     protected void handle(CrackedMessage message) {
-        if (message.getSuccess()) {
+        if (message.getSuccess() & this.passwordHash.containsKey(message.getPasswordId())) {
+
+            this.hints.remove(message.getPasswordId());
+            this.passwordHash.remove(message.getPasswordId());
+
             String password = message.getPassword();
             int passwordId = message.getPasswordId();
             this.log().info("Cracked password number " + passwordId + ", it is: " + password);
-            ArrayList<TaskMessage> newQueue = new ArrayList<>();
             Iterator<TaskMessage> i = this.taskQueue.iterator();
             while(i.hasNext()) {
                 TaskMessage task = i.next();
-                if (task.getId() != message.getPasswordId()) {
-                    newQueue.add(task);
+                if (task.getId() == message.getPasswordId()) {
+                    i.remove();
                 }
             }
-            this.taskQueue = newQueue;
             this.collector.tell(new Collector.CollectMessage(password), this.self());
+            this.log().info("Task queueu length [crackingPasswords] is: " + this.taskQueue.size());
+            if (this.taskQueue.size() == 0) {
+                this.reader.tell(new Reader.ReadMessage(), this.self());
+            }
         }
+        Integer taskCount = this.actorTasks.getOrDefault(message.getSender(), 1);
+        this.actorTasks.put(message.getSender(), taskCount-1);
+        this.schedule();
     }
 
     protected void handle(ResponseMessage message) {
@@ -238,23 +253,21 @@ public class Master extends AbstractLoggingActor {
                 this.hints.put(message.getPasswordId(), current);
             }
             Boolean finishedPwd = (current.length() == this.hintCount);
-            ArrayList<TaskMessage> newQueue = new ArrayList<>();
             Iterator<TaskMessage> i = this.taskQueue.iterator();
             while(i.hasNext()) {
                 TaskMessage task = i.next();
-                if (task.getId() != message.getPasswordId() | (!finishedPwd & task.getHint() != message.getHint())) {
-                    newQueue.add(task);
+                if (task.getId() == message.getPasswordId() & (finishedPwd | task.getHint() == message.getHint())) {
+                    i.remove();
                 }
             }
-            this.taskQueue = newQueue;
-            this.log().info("Task queue length: "+this.taskQueue.size());  
+            this.log().info("Task queue length [solvingHints] is: "+this.taskQueue.size());  
             if (this.taskQueue.size() == 0) {
                 this.crackPasswords();
             } 
         }
-        Integer taskCount = this.actorTasks.getOrDefault(message.getSender(), -1);
+        Integer taskCount = this.actorTasks.getOrDefault(message.getSender(), 1);
         this.actorTasks.put(message.getSender(), taskCount-1);
-        schedule();
+        this.schedule();
     }
 	
 	protected void handle(BatchMessage message) {
@@ -268,19 +281,19 @@ public class Master extends AbstractLoggingActor {
         ArrayList<TaskMessage> tasks = new ArrayList<>();
 		
 		for (String[] line : message.getLines()) {
-			//TODO Remove test limitation
-			if (!line[0].equals("1")) {
-				continue;
-			}
-			this.log().info("Now processing password ID " + line[0].toString() + " - " + line[1].toString());
-			int id = Integer.parseInt(line[0]);
+            
+            int id = Integer.parseInt(line[0]);
+            
             char[] charset = line[2].toCharArray();
             this.globalCharset = new char[charset.length];
             this.globalCharset = charset;
+
             int length = Byte.parseByte(line[3]);
             this.passwordLength = length;
+
+            this.passwordHash.put(Integer.parseInt(line[0]), line[4]);
+            
             this.hintCount = line.length-5; //Hints start in column 5
-			this.passwordHash.put(Integer.parseInt(line[0]), line[4]);
 			String[] hintInput = new String[this.hintCount]; 
 			
 			for (int i = 5; i < line.length; i++) { //Hints start in column 5
@@ -288,21 +301,17 @@ public class Master extends AbstractLoggingActor {
 			}
 
 			tasks.addAll(this.hintTasks(id, charset, length, hintInput));
-
-			int tasksSize = tasks.size();
-            this.log().info("Generated " + tasksSize + " subtasks");
         }
 
         Collections.shuffle(tasks);
         this.taskQueue.addAll(tasks);
         this.schedule();
         
-		this.collector.tell(new Collector.CollectMessage("Processed batch of size " + message.getLines().size()), this.self());
-		this.reader.tell(new Reader.ReadMessage(), this.self());
+		//this.collector.tell(new Collector.CollectMessage("Processed batch of size " + message.getLines().size()), this.self());
 	}
 	
 	protected void terminate() {
-		/*this.reader.tell(PoisonPill.getInstance(), ActorRef.noSender());
+		this.reader.tell(PoisonPill.getInstance(), ActorRef.noSender());
 		this.collector.tell(PoisonPill.getInstance(), ActorRef.noSender());
 		
 		for (ActorRef worker : this.workers) {
@@ -313,7 +322,7 @@ public class Master extends AbstractLoggingActor {
 		this.self().tell(PoisonPill.getInstance(), ActorRef.noSender());
 		
 		long executionTime = System.currentTimeMillis() - this.startTime;
-		this.log().info("Algorithm finished in {} ms", executionTime);*/
+		this.log().info("Algorithm finished in {} ms", executionTime);
 	}
 
 	protected void handle(RegistrationMessage message) {
