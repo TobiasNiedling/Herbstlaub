@@ -41,7 +41,7 @@ public class Master extends AbstractLoggingActor {
     //3 works good to not get heart beet errors on low spec hardware
     //4 leads to quite smaller tasks for the workers, but in order to not overtask the master, buffersize should be reduced to ~20
     //Should be as low as possible to efficently use the hardware
-    private final int SUBDIVIDE_BREAK_LENGTH = 2; 
+    private final int SUBDIVIDE_BREAK_LENGTH = 3; 
 
 	public static Props props(final ActorRef reader, final ActorRef collector) {
 		return Props.create(Master.class, () -> new Master(reader, collector));
