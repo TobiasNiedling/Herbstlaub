@@ -107,8 +107,9 @@ public class Worker extends AbstractLoggingActor {
     
     private void handle(String message) {
         this.log().info(message);
-    }
-
+	}
+	
+	//Permutate all possible hints or passwords and check if the hash equals the input
 	private void handle(Master.TaskMessage message) {
         if (message.getCrackPassword()) {
             ArrayList<String> permutated = new ArrayList<>();

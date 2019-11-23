@@ -2,14 +2,11 @@ package de.hpi.ddm.actors;
 
 import java.io.Serializable;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-
-import com.esotericsoftware.reflectasm.shaded.org.objectweb.asm.ByteVector;
 
 import org.apache.commons.lang3.ArrayUtils;
 
@@ -18,7 +15,6 @@ import akka.actor.ActorRef;
 import akka.actor.PoisonPill;
 import akka.actor.Props;
 import akka.actor.Terminated;
-import akka.stream.stage.TimerMessages.Scheduled;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -37,11 +33,12 @@ public class Master extends AbstractLoggingActor {
     private HashMap<Integer,String> passwordHash = new HashMap<>();
     private char[] globalCharset;
     private Integer hintCount;
-    private Integer passwordLength;
+	private Integer passwordLength;
+	private Integer batchSize;
 
     //Parameter to determine how many subtasks should be queued (the length of fixed start is maximum this length)
     //2 Worked fine on our home hardware
-    //3 works good to not get heart beet errors on lwo spec hardware
+    //3 works good to not get heart beet errors on low spec hardware
     //4 leads to quite smaller tasks for the workers, but in order to not overtask the master, buffersize should be reduced to ~20
     //Should be as low as possible to efficently use the hardware
     private final int SUBDIVIDE_BREAK_LENGTH = 2; 
@@ -149,6 +146,7 @@ public class Master extends AbstractLoggingActor {
 		this.reader.tell(new Reader.ReadMessage(), this.self());
 	}
 
+	//Split the tasks into smaller ones, that can be handled easier
 	private ArrayList<TaskMessage> subdivide(ArrayList<TaskMessage> tasks) {
 
 		ArrayList<TaskMessage> result = new ArrayList<>();
@@ -170,6 +168,7 @@ public class Master extends AbstractLoggingActor {
 		return result;
 	}
 
+	//Generate tasks to crack hints (remove one character from charset, which could be the hint)
 	private ArrayList<TaskMessage> hintTasks(int id, char[] charset, int length, String[] hintInput) {
 
 		ArrayList<TaskMessage> result = new ArrayList<>();
@@ -183,6 +182,7 @@ public class Master extends AbstractLoggingActor {
         //return result;
     }
 
+	//Assign the generated subtasks to the workers
     private void schedule() {
         if (this.taskQueue.size() > 0) {
             for (ActorRef actor: this.workers) {
@@ -198,6 +198,7 @@ public class Master extends AbstractLoggingActor {
         }
     }
 
+	//If all hints from a batch are cracked, generate Tasks for the passwords
     private void crackPasswords() {
         for (Map.Entry<Integer, String> entry: this.hints.entrySet()) {
             char[] crackCharset = new char[this.globalCharset.length - entry.getValue().length()];
@@ -217,54 +218,68 @@ public class Master extends AbstractLoggingActor {
             this.schedule();
         }
     }
-    
+	
+	//Password was cracked by the worker, forward it to the collector and remove the password from the task queue
     protected void handle(CrackedMessage message) {
         if (message.getSuccess() & this.passwordHash.containsKey(message.getPasswordId())) {
 
+			//Remove password from store
             this.hints.remove(message.getPasswordId());
             this.passwordHash.remove(message.getPasswordId());
 
+			//Remove password from queue
             String password = message.getPassword();
-            int passwordId = message.getPasswordId();
-            this.log().info("Cracked password number " + passwordId + ", it is: " + password);
             Iterator<TaskMessage> i = this.taskQueue.iterator();
             while(i.hasNext()) {
                 TaskMessage task = i.next();
                 if (task.getId() == message.getPasswordId()) {
                     i.remove();
                 }
-            }
+			}
+			
+			//Tell collector
             this.collector.tell(new Collector.CollectMessage(password), this.self());
-            this.log().info("Task queueu length [crackingPasswords] is: " + this.taskQueue.size());
             if (this.taskQueue.size() == 0) {
+				this.collector.tell(new Collector.CollectMessage("Processed batch of size " + batchSize), this.self());
                 this.reader.tell(new Reader.ReadMessage(), this.self());
             }
-        }
+		}
+		
+		//Worker scheduling
         Integer taskCount = this.actorTasks.getOrDefault(message.getSender(), 1);
         this.actorTasks.put(message.getSender(), taskCount-1);
         this.schedule();
     }
 
+	
+	//Hint was cracked (or not), remove unnecessary tasks
     protected void handle(ResponseMessage message) {
         if (message.getSuccess()) {
-            String current = this.hints.getOrDefault(message.getPasswordId(), "");
+
+			//Allready cracked the hint?
+			String current = this.hints.getOrDefault(message.getPasswordId(), "");
             if (!(current.indexOf(message.getHint()) > -1)) {
                 current += message.getHint();
                 this.hints.put(message.getPasswordId(), current);
-            }
+			}
+			
+			//Remove tasks
             Boolean finishedPwd = (current.length() == this.hintCount);
-            Iterator<TaskMessage> i = this.taskQueue.iterator();
+			Iterator<TaskMessage> i = this.taskQueue.iterator();
             while(i.hasNext()) {
                 TaskMessage task = i.next();
                 if (task.getId() == message.getPasswordId() & (finishedPwd | task.getHint() == message.getHint())) {
                     i.remove();
                 }
-            }
-            this.log().info("Task queue length [solvingHints] is: "+this.taskQueue.size());  
+			}
+
+			//Cracked all hints?
             if (this.taskQueue.size() == 0) {
                 this.crackPasswords();
             } 
-        }
+		}
+		
+		//Worker scheduling
         Integer taskCount = this.actorTasks.getOrDefault(message.getSender(), 1);
         this.actorTasks.put(message.getSender(), taskCount-1);
         this.schedule();
@@ -280,6 +295,7 @@ public class Master extends AbstractLoggingActor {
         
         ArrayList<TaskMessage> tasks = new ArrayList<>();
 		
+		//Extract information from input
 		for (String[] line : message.getLines()) {
             
             int id = Integer.parseInt(line[0]);
@@ -301,13 +317,18 @@ public class Master extends AbstractLoggingActor {
 			}
 
 			tasks.addAll(this.hintTasks(id, charset, length, hintInput));
-        }
+		}
 
+		this.batchSize = message.getLines().size();
+		
+		//Some of the generated subtasks are aiming for the same hint
+		//If we would not shuffle the tasks, most of these redundant tasks will run in parallel and then all be executed
+		//Due to shuffeling different hints/passwords are cracked in parallel and if a hint is cracked, the chance is higher, 
+		//that the redundant task where not allready assigned to a worker
+		//So this is only for performance improvement
         Collections.shuffle(tasks);
         this.taskQueue.addAll(tasks);
         this.schedule();
-        
-		//this.collector.tell(new Collector.CollectMessage("Processed batch of size " + message.getLines().size()), this.self());
 	}
 	
 	protected void terminate() {
