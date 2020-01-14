@@ -47,4 +47,7 @@ build.log
 ./spark
 spark
 
+#Exclude data
+data
+
 
