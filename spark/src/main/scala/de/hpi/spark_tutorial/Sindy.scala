@@ -38,14 +38,22 @@ object Sindy {
     /////// PROCESS //////////////////////////////
     //////////////////////////////////////////////
 
-    val input = spark.read
-      .option("inferSchema", "true")
-      .option("header", "true")
-      .option("delimiter", ";")
-      .csv("data/tpch_nation.csv")
-      
-    val columns = input.columns //df im map aufrufen findet spark eher unwitzig
-    input.map(row => row.toSeq.zipWithIndex.map{case (cell, index) => (cell.toString, columns(index))}).show(false) //a suggested in slides: build key value pairs of cell value and column name
+    val cells = List("region", "nation"/*, "supplier", "customer", "part", "lineitem", "orders"*/)
+      .map{path =>
+        val input = spark.read
+          .option("header", "true")
+          .option("delimiter", ";")
+          .csv(s"data/tpch_$path.csv")   
+        val columns = input.columns //input im map aufrufen findet spark eher unwitzig
+        input
+          .flatMap(row => row.toSeq.zipWithIndex
+            .map{case (cell, index) => (cell.toString, columns(index))} //a suggested in slides: build key value pairs of cell value and column name
+          )
+          .distinct 
+      }
+      .reduce(_ union _)
+      .toDF("key", "value")
+      .show(false)
   }
 
   def discoverINDs(inputs: List[String], spark: SparkSession): Unit = {
