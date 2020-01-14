@@ -42,3 +42,8 @@ data/TPCH
 
 #SHITTY output not in target directory
 build.log
+
+#Exclude spark binary
+./spark
+
+
