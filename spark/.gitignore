@@ -45,5 +45,6 @@ build.log
 
 #Exclude spark binary
 ./spark
+spark
 
 
