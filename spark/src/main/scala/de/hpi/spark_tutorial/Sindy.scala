@@ -40,7 +40,8 @@ object Sindy {
     //////////////////////////////////////////////
 
     val cells = List("region", "nation"/*, "supplier", "customer", "part", "lineitem", "orders"*/)
-      .map{path =>
+      .map{
+        path =>
         val input = spark.read
           .option("header", "true")
           .option("delimiter", ";")
@@ -66,7 +67,14 @@ object Sindy {
       ) //create a tuple for each column contained in others
       .toDF("included", "in")
       .distinct
-      .show(200, false)
+      .groupBy("included")
+      .agg(collect_set("in"))
+      .withColumnRenamed("collect_set(in)", "in")
+      .as[(String, Array[Array[String]])]
+      .map(
+        row => (row._1, row._2.reduce((a,b) => a intersect b))
+      )
+      .show(false)
   }
 
   def discoverINDs(inputs: List[String], spark: SparkSession): Unit = {
