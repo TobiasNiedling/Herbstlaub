@@ -33,7 +33,7 @@ object Sindy {
 
     // Importing implicit encoders for standard library classes and tuples that are used as Dataset types
     import spark.implicits._
-    import org.apache.spark.sql.functions.collect_list
+    import org.apache.spark.sql.functions.{collect_set, size}
 
     //////////////////////////////////////////////
     /////// PROCESS //////////////////////////////
@@ -52,12 +52,21 @@ object Sindy {
           )
           .distinct 
       }
-      .reduce(_ union _)
+      .reduce(_ union _) //get one DF instead of List[Dataset]
       .toDF("key", "value")
       .groupBy("key")
-      .agg(collect_list("value"))
-      .withColumnRenamed("collect_list(value)", "values")
-      .show(false)
+      .agg(collect_set("value")) //get all columns containing that value
+      .withColumnRenamed("collect_set(value)", "values")
+      .select("values") //column values are not needed any longer
+      .as[Array[String]]
+      .flatMap(
+        row => row.map(
+          col => (col, row.filter(!_.equals(col)).map(other => other)) //each column is obviously contained in it self, so remove it with filter
+        )
+      ) //create a tuple for each column contained in others
+      .toDF("included", "in")
+      .distinct
+      .show(200, false)
   }
 
   def discoverINDs(inputs: List[String], spark: SparkSession): Unit = {
