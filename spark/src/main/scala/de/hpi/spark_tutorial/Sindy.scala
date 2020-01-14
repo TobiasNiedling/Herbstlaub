@@ -39,7 +39,7 @@ object Sindy {
     /////// PROCESS //////////////////////////////
     //////////////////////////////////////////////
 
-    val cells = List("region", "nation"/*, "supplier", "customer", "part", "lineitem", "orders"*/)
+    List("region", "nation", "supplier", "customer", "part", "lineitem", "orders")
       .map{
         path =>
         val input = spark.read
@@ -74,7 +74,14 @@ object Sindy {
       .map(
         row => (row._1, row._2.reduce((a,b) => a intersect b))
       )
-      .show(false)
+      .toDF("included", "in")
+      .where(size($"in")>0)
+      .orderBy("included")
+      .as[(String, Array[String])] 
+      .collect
+      .foreach(
+        row => println(s"${row._1} < ${row._2.mkString(", ")}")
+      )
   }
 
   def discoverINDs(inputs: List[String], spark: SparkSession): Unit = {
