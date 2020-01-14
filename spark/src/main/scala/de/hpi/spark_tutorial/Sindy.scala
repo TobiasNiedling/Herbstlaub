@@ -33,6 +33,7 @@ object Sindy {
 
     // Importing implicit encoders for standard library classes and tuples that are used as Dataset types
     import spark.implicits._
+    import org.apache.spark.sql.functions.collect_list
 
     //////////////////////////////////////////////
     /////// PROCESS //////////////////////////////
@@ -53,6 +54,9 @@ object Sindy {
       }
       .reduce(_ union _)
       .toDF("key", "value")
+      .groupBy("key")
+      .agg(collect_list("value"))
+      .withColumnRenamed("collect_list(value)", "values")
       .show(false)
   }
 
