@@ -1,55 +1,61 @@
 package de.hpi.spark_tutorial
 
 import org.apache.spark.sql.{Dataset, Encoder, SparkSession}
-import org.apache.spark.ml.Pipeline
-import org.apache.spark.ml.classification.DecisionTreeClassificationModel
-import org.apache.spark.ml.classification.DecisionTreeClassifier
-import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
-import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorIndexer}
+import org.apache.spark.sql.functions.{collect_set, size}
 import org.apache.log4j.Logger
 import org.apache.log4j.Level
+import org.apache.commons.cli._
 
 object Sindy {
 
+  /**
+  * Parses arguments from command line
+  **/
+  private def getCommands(args: Array[String]): (String, String) = {
+    val options: Options = new Options()
+    options.addOption("path", true, "input path of tpch files")
+    options.addOption("cores", true, "number of cores to be used")
+
+    val parser: CommandLineParser = new BasicParser()
+    val cmd: CommandLine = parser.parse(options, args)
+
+    val cores_ = cmd.getOptionValue("cores")
+    val path_ = cmd.getOptionValue("path")
+
+    val cores = if(cores_ == null) "TPCH" else cores_
+    val path = if(path_ == null) "4" else path_
+  }
+
   def main(args: Array[String]): Unit = {
 
-    //////////////////////////////////////////////
-    /////// SET UP ///////////////////////////////
-    //////////////////////////////////////////////
+    val (cores, path) = getCommands(args)
 
     // Turn off logging
     Logger.getLogger("org").setLevel(Level.OFF)
     Logger.getLogger("akka").setLevel(Level.OFF)
 
-    // Create a SparkSession to work with Spark
+    // Spark Setup
     val sparkBuilder = SparkSession
       .builder()
       .appName("SparkTutorial")
-      .master("local[4]") // local, with 4 worker cores
-    val spark = sparkBuilder.getOrCreate()
-
-    // Set the default number of shuffle partitions (default is 200, which is too high for local deployment)
-    spark.conf.set("spark.sql.shuffle.partitions", "8") //
-
-    // Importing implicit encoders for standard library classes and tuples that are used as Dataset types
+      .master(s"local[$cores]") 
+    implicit val spark = sparkBuilder.getOrCreate()
     import spark.implicits._
-    import org.apache.spark.sql.functions.{collect_set, size}
+    spark.conf.set("spark.sql.shuffle.partitions", "8")
 
-    //////////////////////////////////////////////
-    /////// PROCESS //////////////////////////////
-    //////////////////////////////////////////////
-
+    // Lets go
     List("region", "nation", "supplier", "customer", "part", "lineitem", "orders")
+      //Read all files
       .map{
         path =>
         val input = spark.read
           .option("header", "true")
           .option("delimiter", ";")
-          .csv(s"data/tpch_$path.csv")   
+          .csv(s"$path/tpch_$path.csv")   
         val columns = input.columns //input im map aufrufen findet spark eher unwitzig
         input
           .flatMap(row => row.toSeq.zipWithIndex
-            .map{case (cell, index) => (cell.toString, columns(index))} //a suggested in slides: build key value pairs of cell value and column name
+            .map{case (cell, index) => (cell.toString, columns(index))} //as suggested in slides: build key value pairs of cell value and column name
           )
           .distinct 
       }
@@ -57,35 +63,27 @@ object Sindy {
       .toDF("key", "value")
       .groupBy("key")
       .agg(collect_set("value")) //get all columns containing that value
-      .withColumnRenamed("collect_set(value)", "values")
-      .select("values") //column values are not needed any longer
+      .select("collect_set(value)") //column values are not needed any longer
       .as[Array[String]]
       .flatMap(
         row => row.map(
           col => (col, row.filter(!_.equals(col)).map(other => other)) //each column is obviously contained in it self, so remove it with filter
         )
-      ) //create a tuple for each column contained in others
+      ) //create a tuple for each column that may be contained in others
       .toDF("included", "in")
       .distinct
       .groupBy("included")
-      .agg(collect_set("in"))
-      .withColumnRenamed("collect_set(in)", "in")
+      .agg(collect_set("in")) //collect all possible inclusions for that column
       .as[(String, Array[Array[String]])]
       .map(
         row => (row._1, row._2.reduce((a,b) => a intersect b))
-      )
+      ) //intersection between all arrays is the correct inclusion
       .toDF("included", "in")
-      .where(size($"in")>0)
+      .where(size($"in")>0) //prepare for output
       .orderBy("included")
       .as[(String, Array[String])] 
-      .collect
-      .foreach(
+      .collect.foreach(
         row => println(s"${row._1} < ${row._2.mkString(", ")}")
       )
-  }
-
-  def discoverINDs(inputs: List[String], spark: SparkSession): Unit = {
-
-    // TODO
   }
 }
