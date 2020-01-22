@@ -24,11 +24,13 @@ object Sindy {
 
     val cores = if(cores_ == null) "TPCH" else cores_
     val path = if(path_ == null) "4" else path_
+
+    (cores, path)
   }
 
   def main(args: Array[String]): Unit = {
 
-    val (cores, path) = getCommands(args)
+    val (cores, basePath) = getCommands(args)
 
     // Turn off logging
     Logger.getLogger("org").setLevel(Level.OFF)
@@ -51,7 +53,7 @@ object Sindy {
         val input = spark.read
           .option("header", "true")
           .option("delimiter", ";")
-          .csv(s"$path/tpch_$path.csv")   
+          .csv(s"$basePath/tpch_$path.csv")   
         val columns = input.columns //input im map aufrufen findet spark eher unwitzig
         input
           .flatMap(row => row.toSeq.zipWithIndex
