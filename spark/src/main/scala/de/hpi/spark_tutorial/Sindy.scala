@@ -43,7 +43,8 @@ object Sindy {
       .master(s"local[$cores]") 
     implicit val spark = sparkBuilder.getOrCreate()
     import spark.implicits._
-    spark.conf.set("spark.sql.shuffle.partitions", "8")
+    val partitions = cores.toInt * 2
+    spark.conf.set("spark.sql.shuffle.partitions", partitions.toString)
 
     // Lets go
     List("region", "nation", "supplier", "customer", "part", "lineitem", "orders")
